@@ -113,8 +113,11 @@ export function SelectPage() {
     const emptySources = emptyMode
       ? [...unselected].sort(() => Math.random() - 0.5).slice(0, selected.length)
       : []
-
-    const restPool = unselected.flatMap((card) => card.songs)
+    const emptySourceIds = new Set(emptySources.map((card) => card.id))
+    // 休息曲池排除参赛牌与空牌来源牌（与桌面版一致）
+    const restPool = unselected
+      .filter((card) => !emptySourceIds.has(card.id))
+      .flatMap((card) => card.songs)
     const payload: SelectionResult = { selected, restPool, emptySources }
     sessionStorage.setItem(`karuta-selection:${deck.id}`, JSON.stringify(payload))
     navigate(`/game/${deck.id}`)

@@ -195,14 +195,8 @@ export class GameEngine {
       ? this.pickRandom(card.songs)
       : null
 
-    if (card.emptyCard) {
-      this.roundState = 'EMPTY_CARD'
-      this.playbackDuration = 0
-      this.emit()
-      return
-    }
-
-    this.roundState = 'CARD_SELECTED'
+    // 空牌仍播放题目曲目，但判定固定为成功（与桌面版一致）
+    this.roundState = card.emptyCard ? 'EMPTY_CARD' : 'CARD_SELECTED'
     this.emit()
     void this.playCurrentSong()
   }

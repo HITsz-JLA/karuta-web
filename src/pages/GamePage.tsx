@@ -190,7 +190,7 @@ export function GamePage() {
             <button
               className="btn btn-danger btn-lg"
               type="button"
-              disabled={!canJudge}
+              disabled={!canJudge || Boolean(snap?.currentCard?.emptyCard)}
               onClick={() => engine.submitResult('FAILURE')}
             >
               Failure
