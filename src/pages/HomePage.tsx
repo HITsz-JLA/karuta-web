@@ -1,10 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
-import { importDeckZip } from '../lib/zipPackage'
+import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
+import { downloadServerPackage, listServerPackages, type ServerPackage } from '../lib/serverPackages'
 import type { FailureMode } from '../types/models'
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
 
 export function HomePage() {
   const navigate = useNavigate()
@@ -12,10 +19,12 @@ export function HomePage() {
   const { settings, update } = useSettings()
   const [selectedId, setSelectedId] = useState<string | undefined>()
   const { deck } = useDeck(selectedId)
-  const fileRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [previewIndex, setPreviewIndex] = useState(0)
+  const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
+  const [packagesLoading, setPackagesLoading] = useState(true)
 
   useEffect(() => {
     if (!selectedId && decks[0]) setSelectedId(decks[0].id)
@@ -25,6 +34,10 @@ export function HomePage() {
     setPreviewIndex(0)
   }, [selectedId])
 
+  useEffect(() => {
+    void refreshServerPackages()
+  }, [])
+
   const previewCard = deck?.cards[previewIndex] || null
   const previewUrl = useObjectUrl(previewCard?.imageBlobKey)
 
@@ -33,11 +46,31 @@ export function HomePage() {
     [deck],
   )
 
-  async function handleImportZip(file: File) {
+  const importProgressLabel =
+    importProgress?.stage === 'reading'
+      ? '正在读取 ZIP…'
+      : importProgress?.stage === 'parsing'
+        ? '正在解析 CSV…'
+        : importProgress?.stage === 'resources'
+          ? importProgress.total
+            ? `正在导入资源 ${Math.min(Math.ceil(importProgress.current), importProgress.total)}/${importProgress.total}`
+            : '正在整理数据…'
+          : null
+
+  const importProgressValue = importProgress
+    ? importProgress.total > 0
+      ? Math.min(importProgress.current, importProgress.total)
+      : 0
+    : 0
+
+  async function loadServerPackage(serverPackage: ServerPackage) {
     setBusy(true)
+    setImportProgress(null)
     setMessage(null)
     try {
-      const imported = await importDeckZip(file)
+      const blob = await downloadServerPackage(serverPackage.id)
+      const file = new File([blob], serverPackage.fileName, { type: 'application/zip' })
+      const imported = await importDeckZip(file, serverPackage.name, (progress) => setImportProgress(progress))
       await refresh()
       setSelectedId(imported.id)
       setMessage(`已导入：${imported.name}`)
@@ -45,6 +78,18 @@ export function HomePage() {
       setMessage(error instanceof Error ? error.message : '导入失败')
     } finally {
       setBusy(false)
+      setImportProgress(null)
+    }
+  }
+
+  async function refreshServerPackages() {
+    setPackagesLoading(true)
+    try {
+      setServerPackages(await listServerPackages())
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '无法读取服务器数据包')
+    } finally {
+      setPackagesLoading(false)
     }
   }
 
@@ -79,7 +124,7 @@ export function HomePage() {
     <>
       <section className="hero">
         <h1>点歌对战</h1>
-        <p>数据与音频都保存在本机浏览器，服务器只托管页面静态资源。</p>
+        <p>歌牌数据包存放在服务器本地，普通用户只能读取；管理员登录后可上传 ZIP。</p>
       </section>
 
       <div className="grid-home">
@@ -90,32 +135,66 @@ export function HomePage() {
               刷新
             </button>
           </div>
-          <p className="muted small">左侧选择数据集，右侧预览卡面。可导入原版兼容的 ZIP / 本地新建。</p>
+          <p className="muted small">从服务器选择数据包并加载到当前浏览器后开始对战。</p>
 
           <div className="row">
-            <button className="btn btn-secondary" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>
-              导入 ZIP
+            <button className="btn btn-secondary" type="button" onClick={() => void refreshServerPackages()} disabled={packagesLoading || busy}>
+              刷新服务器包
             </button>
             <button className="btn btn-secondary" type="button" onClick={() => void createEmptyDeck()}>
-              新建
+              新建本地数据集
             </button>
             {selectedId ? (
               <Link className="btn btn-secondary" to={`/editor/${selectedId}`}>
-                编辑
+                编辑本地副本
               </Link>
             ) : null}
           </div>
-          <input
-            ref={fileRef}
-            className="hidden-file"
-            type="file"
-            accept=".zip,application/zip"
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              if (file) void handleImportZip(file)
-              event.target.value = ''
-            }}
-          />
+
+          <section className="panel stack" style={{ boxShadow: 'none' }}>
+            <div className="row spread">
+              <strong>服务器数据包</strong>
+              <span className="muted small">普通用户只读</span>
+            </div>
+            {packagesLoading ? <div className="empty-state">正在读取服务器数据包…</div> : null}
+            {!packagesLoading && !serverPackages.length ? (
+              <div className="empty-state">服务器暂时没有数据包</div>
+            ) : null}
+            {!packagesLoading
+              ? serverPackages.map((serverPackage) => (
+                  <div className="row spread" key={serverPackage.id}>
+                    <div>
+                      <strong>{serverPackage.name}</strong>
+                      <div className="muted small">
+                        {formatBytes(serverPackage.size)} · {new Date(serverPackage.updatedAt).toLocaleString()}
+                      </div>
+                    </div>
+                    <button
+                      className="btn btn-primary"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void loadServerPackage(serverPackage)}
+                    >
+                      加载
+                    </button>
+                  </div>
+                ))
+              : null}
+          </section>
+
+          {busy && importProgressLabel ? (
+            <div className="stack" role="status" aria-live="polite" style={{ marginTop: 12 }}>
+              <span className="muted small">
+                {importProgressLabel}
+                {importProgress?.fileName ? `：${importProgress.fileName}` : ''}
+              </span>
+              <progress
+                value={importProgressValue}
+                max={importProgress?.total || 1}
+                style={{ width: '100%' }}
+              />
+            </div>
+          ) : null}
 
           <div className="deck-list">
             {loading ? <div className="empty-state">加载中…</div> : null}

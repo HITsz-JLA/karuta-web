@@ -111,6 +111,14 @@ export async function putBlob(key: string, blob: Blob, mime?: string): Promise<s
   return key
 }
 
+export async function deleteBlobs(keys: string[]): Promise<void> {
+  if (!keys.length) return
+  const db = await getDb()
+  const tx = db.transaction('blobs', 'readwrite')
+  await Promise.all(keys.map((key) => tx.store.delete(key)))
+  await tx.done
+}
+
 export async function getBlob(key: string): Promise<Blob | undefined> {
   const db = await getDb()
   const record = await db.get('blobs', key)

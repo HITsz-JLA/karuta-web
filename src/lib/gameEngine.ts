@@ -2,6 +2,7 @@ import type { CardEntry, FailureMode, RoundResult, RoundState, SongEntry } from 
 import { getBlob } from './storage'
 
 const REST_VOLUME_FACTOR = Math.pow(10, -12 / 20)
+const MAX_PLAYBACK_SECONDS = 30
 
 export interface GameSnapshot {
   roundState: RoundState
@@ -51,10 +52,11 @@ export class AudioController {
     await this.audio.play()
 
     if (limitSeconds && limitSeconds > 0) {
+      const effectiveLimit = Math.min(limitSeconds, MAX_PLAYBACK_SECONDS)
       this.limitTimer = window.setTimeout(() => {
         this.pause()
         this.onEnded?.()
-      }, limitSeconds * 1000)
+      }, effectiveLimit * 1000)
     }
   }
 
@@ -209,7 +211,7 @@ export class GameEngine {
     }
 
     const session = ++this.playSession
-    this.playbackDuration = this.randomDuration()
+    this.playbackDuration = Math.min(this.randomDuration(), MAX_PLAYBACK_SECONDS)
     this.roundState = 'MUSIC_PLAYING'
     this.emit()
 
@@ -279,8 +281,14 @@ export class GameEngine {
 
     try {
       this.isRestPlaying = true
+      const restSession = this.playSession
+      this.audio.setOnEnded(() => {
+        if (restSession !== this.playSession) return
+        this.isRestPlaying = false
+        this.emit()
+      })
       this.emit()
-      await this.audio.playSong(song, this.volume * REST_VOLUME_FACTOR)
+      await this.audio.playSong(song, this.volume * REST_VOLUME_FACTOR, MAX_PLAYBACK_SECONDS)
     } catch {
       this.isRestPlaying = false
       this.emit()
@@ -358,10 +366,12 @@ export class GameEngine {
   }
 
   private randomDuration() {
-    if (this.minDuration >= this.maxDuration) return this.minDuration
+    const min = Math.min(Math.max(1, this.minDuration), MAX_PLAYBACK_SECONDS)
+    const max = Math.min(Math.max(min, this.maxDuration), MAX_PLAYBACK_SECONDS)
+    if (min >= max) return min
     return (
-      this.minDuration +
-      Math.floor(Math.random() * (this.maxDuration - this.minDuration + 1))
+      min +
+      Math.floor(Math.random() * (max - min + 1))
     )
   }
 

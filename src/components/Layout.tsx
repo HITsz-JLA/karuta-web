@@ -14,6 +14,9 @@ export function Layout() {
           <Link className="btn btn-ghost" to="/editor">
             数据集
           </Link>
+          <Link className="btn btn-ghost" to="/admin">
+            管理员
+          </Link>
         </nav>
       </header>
       <main className="app-main">

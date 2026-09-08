@@ -2,7 +2,7 @@
 
 基于 [komariChikaA/karuta](https://github.com/komarichikaa/karuta) 的 **纯前端** Web 版点歌对战工具。
 
-服务器只托管静态页面；数据集、图片、音频、对局逻辑、PDF 导出全部在浏览器本地完成（IndexedDB），适合手机 / 平板 / 桌面。
+服务器保存管理员上传的数据包；数据集、图片、音频、对局逻辑、PDF 导出仍在浏览器本地完成（IndexedDB），适合手机 / 平板 / 桌面。
 
 ## 相对原版的改动
 
@@ -13,6 +13,7 @@
 
 - 数据集新建 / 编辑 / 删除
 - ZIP 数据包导入导出（兼容原版 CSV + images + music 结构）
+- 服务器本地数据包目录与独立管理员上传页面
 - CSV 导出（含 `card_number` 列）
 - 标准 / 专辑 A4 打印 PDF
 - 开局选卡、空牌模式、PASS/SKIP、休息曲、管理员面板
@@ -20,8 +21,10 @@
 ## 开发
 
 ```bash
-npm install
-npm run dev
+npm ci
+npm run server
+# 另开终端
+npm run dev -- --host 0.0.0.0
 ```
 
 ```bash
@@ -30,6 +33,8 @@ npm run preview
 ```
 
 构建产物在 `dist/`，可直接放到任意静态站点（GitHub Pages、社团服务器等）。
+
+更完整的部署、远程数据包格式和后续任务见 [`docs/任务交接.md`](docs/任务交接.md) 与 [`docs/部署与数据包说明.md`](docs/部署与数据包说明.md)。
 
 ## 使用提示
 
