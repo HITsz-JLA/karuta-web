@@ -96,9 +96,9 @@ function normalizeMetadataRows(rows) {
       .filter((song) => song.fileName && song.displayName)
     const imagePaths = firstListValue(orderedRows, 'cover_paths')
     const imageFiles = firstListValue(orderedRows, 'cover_files')
-    const imagePath = imagePaths[0] || imageFiles[0] || ''
+    const imagePath = imagePaths.find(isWebp) || imageFiles.find(isWebp) || imagePaths[0] || imageFiles[0] || ''
     if (!imagePath) return null
-    const imageName = baseName(imageFiles[0] || imagePath || `card_${index + 1}.jpg`)
+    const imageName = baseName(imagePath || `card_${index + 1}.jpg`)
     const workName = readField(orderedRows[0] || {}, 'work_name') || [group.category, group.workNumber].filter(Boolean).join(' ') || `作品 ${index + 1}`
     return {
       imageName,
@@ -169,6 +169,10 @@ function normalizeHeader(value) {
 
 function baseName(value) {
   return String(value || '').replace(/^.*[\\/]/, '').trim()
+}
+
+function isWebp(value) {
+  return /\.webp$/i.test(String(value || '').trim())
 }
 
 function stripExtension(value) {

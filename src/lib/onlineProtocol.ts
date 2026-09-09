@@ -56,6 +56,7 @@ export interface OnlineDraftView {
 export interface OnlinePendingTransferView {
   from: OnlinePlayerId
   to: OnlinePlayerId
+  reason: 'wrong_claim' | 'opponent_card'
   expiresAtServerTime: number
 }
 
@@ -69,6 +70,9 @@ export interface OnlineRoomView {
   players: Record<OnlinePlayerId, OnlinePlayerView | null>
   cards: OnlineCardView[]
   remainingCardKeys: string[]
+  emptyRemainingCount: number
+  restEndsAtServerTime: number | null
+  restReason: 'wrong_claim' | 'opponent_card' | 'round' | 'empty' | null
   roundNo: number
   totalRounds: number
   fairness: OnlineFairnessView
@@ -109,6 +113,7 @@ export interface OnlineRoundStart {
   roundNo: number
   startAtServerTime: number
   windowMs: number
+  isEmpty: boolean
   audioUrl: string
 }
 
@@ -116,8 +121,9 @@ export interface OnlineRoundResult {
   t: 'roundResult'
   roundNo: number
   cardKey: string
+  isEmpty: boolean
   winner: OnlinePlayerId | null
-  reason: 'claimed' | 'timeout'
+  reason: 'claimed' | 'timeout' | 'wrong'
   song: { displayName: string; fileName: string }
   scores: Record<OnlinePlayerId, number>
   remainingCardKeys: string[]

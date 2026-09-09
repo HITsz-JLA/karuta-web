@@ -97,21 +97,22 @@ export function OnlinePage() {
   const [myClaim, setMyClaim] = useState<ClaimState | null>(null)
   const [opponentClaim, setOpponentClaim] = useState<ClaimState | null>(null)
   const [roundRemaining, setRoundRemaining] = useState(0)
+  const [restRemaining, setRestRemaining] = useState(0)
   const [connected, setConnected] = useState(socket.connected)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const roomRef = useRef<OnlineRoomView | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const [boardOrder, setBoardOrder] = useState<string[]>([])
+  const [boardSlots, setBoardSlots] = useState<Array<string | null>>(() => Array(MAX_HAND_SLOTS).fill(null))
   const [draggingKey, setDraggingKey] = useState<string | null>(null)
-  const [dragOverKey, setDragOverKey] = useState<string | null>(null)
+  const [dragOverSlot, setDragOverSlot] = useState<number | null>(null)
   const [draftSelection, setDraftSelection] = useState<Set<string>>(new Set())
   const [draftBans, setDraftBans] = useState<Set<string>>(new Set())
   const [arrangeRemaining, setArrangeRemaining] = useState(0)
   const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(new Set())
   const [pinMode, setPinMode] = useState(false)
   const draggingKeyRef = useRef<string | null>(null)
-  const dragOverKeyRef = useRef<string | null>(null)
+  const dragOverSlotRef = useRef<number | null>(null)
   const phaseRef = useRef<OnlineRoomView['phase'] | null>(null)
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
 
@@ -208,9 +209,9 @@ export function OnlinePage() {
           setOpponentClaim(null)
           setRoundRemaining(incoming.windowMs)
           draggingKeyRef.current = null
-          dragOverKeyRef.current = null
+          dragOverSlotRef.current = null
           setDraggingKey(null)
-          setDragOverKey(null)
+          setDragOverSlot(null)
           break
         case 'claimFeedback':
           if (roomRef.current && incoming.playerId === roomRef.current.you) {
@@ -218,6 +219,7 @@ export function OnlinePage() {
           } else {
             setOpponentClaim({ cardKey: incoming.cardKey, correct: incoming.correct })
           }
+          if (!incoming.correct) setRound(null)
           break
         case 'cardTransfer':
           setMyClaim(null)
@@ -235,6 +237,8 @@ export function OnlinePage() {
         case 'roundResult':
           setLastResult(incoming)
           setRound(null)
+          setMyClaim(null)
+          setOpponentClaim(null)
           break
         case 'matchOver':
           setMatchOver(incoming)
@@ -310,18 +314,45 @@ export function OnlinePage() {
   }, [room?.draft.arrangeEndsAtServerTime, room?.phase, socket])
 
   useEffect(() => {
+    if (room?.phase !== 'playing' || !room.restEndsAtServerTime) {
+      setRestRemaining(0)
+      return
+    }
+    const localEnd = socket.toLocalTime(room.restEndsAtServerTime)
+    const update = () => setRestRemaining(Math.max(0, localEnd - Date.now()))
+    update()
+    const timer = window.setInterval(update, 250)
+    return () => window.clearInterval(timer)
+  }, [room?.phase, room?.restEndsAtServerTime, socket])
+
+  useEffect(() => {
     const keys = room?.players[room.you]?.handCardKeys || []
-    setBoardOrder((previous) => {
-      const next = [...previous.filter((key) => keys.includes(key)), ...keys.filter((key) => !previous.includes(key))]
+    setBoardSlots((previous) => {
+      const available = new Set(keys)
+      const next = Array<string | null>(MAX_HAND_SLOTS).fill(null)
+      for (let index = 0; index < MAX_HAND_SLOTS; index += 1) {
+        const key = previous[index]
+        if (key && available.has(key)) {
+          next[index] = key
+          available.delete(key)
+        }
+      }
+      for (const key of keys) {
+        if (!available.has(key)) continue
+        const slot = next.indexOf(null)
+        if (slot < 0) break
+        next[slot] = key
+        available.delete(key)
+      }
       if (next.length === previous.length && next.every((key, index) => key === previous[index])) return previous
       return next
     })
     setPinnedKeys((previous) => new Set([...previous].filter((key) => keys.includes(key))))
     if (!keys.length) {
       draggingKeyRef.current = null
-      dragOverKeyRef.current = null
+      dragOverSlotRef.current = null
       setDraggingKey(null)
-      setDragOverKey(null)
+      setDragOverSlot(null)
     }
   }, [room])
 
@@ -344,11 +375,14 @@ export function OnlinePage() {
   const opponent = room ? room.players[otherPlayer(room.you)] : null
   const ownHandKeys = me?.handCardKeys || EMPTY_CARD_KEYS
   const opponentHandKeys = opponent?.handCardKeys || EMPTY_CARD_KEYS
-  const orderedHandCards = useMemo(() => {
+  const orderedHandCards = useMemo<Array<OnlineCardView | null>>(() => {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
-    const order = boardOrder.length ? boardOrder : ownHandKeys
-    return order.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card))
-  }, [boardOrder, ownHandKeys, roomCards])
+    return boardSlots.map((key) => (key ? byKey.get(key) || null : null))
+  }, [boardSlots, roomCards])
+  const opponentHandCards = useMemo<Array<OnlineCardView | null>>(() => {
+    const byKey = new Map(roomCards.map((card) => [card.key, card]))
+    return Array.from({ length: MAX_HAND_SLOTS }, (_, index) => byKey.get(opponentHandKeys[index]) || null)
+  }, [opponentHandKeys, roomCards])
   const draftPoolCards = useMemo(() => {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
     return room?.draft.poolCardKeys.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card)) || []
@@ -357,7 +391,8 @@ export function OnlinePage() {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
     return room?.draft.exchangeCardKeys.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card)) || []
   }, [room?.draft.exchangeCardKeys, roomCards])
-  const canArrange = Boolean((room?.phase === 'arrange' || room?.phase === 'playing') && !round && !matchOver)
+  const isResting = Boolean(room?.phase === 'playing' && restRemaining > 0 && !round && !matchOver)
+  const canArrange = Boolean((room?.phase === 'arrange' || isResting) && !matchOver && !round)
 
   const createRoom = useCallback(async () => {
     if (!selectedPackage || !catalog) {
@@ -421,34 +456,35 @@ export function OnlinePage() {
     setOpponentClaim(null)
     setDraftSelection(new Set())
     setDraftBans(new Set())
-    setBoardOrder([])
+    setBoardSlots(Array(MAX_HAND_SLOTS).fill(null))
     setPinnedKeys(new Set())
     setPinMode(false)
     setMessage(null)
     void socket.connect().then(() => socket.send({ t: 'listRooms' }))
   }, [socket])
 
-  const moveCard = useCallback(
-    (sourceKey: string, targetKey: string) => {
-      if (!canArrange || !sourceKey || sourceKey === targetKey) return
-      setBoardOrder((previous) => {
-        const next = [...(previous.length ? previous : ownHandKeys)]
+  const moveCardToSlot = useCallback(
+    (sourceKey: string, targetSlot: number) => {
+      if (!canArrange || !sourceKey) return
+      const target = Math.max(0, Math.min(MAX_HAND_SLOTS - 1, Math.round(targetSlot)))
+      setBoardSlots((previous) => {
+        const next = [...previous]
         const sourceIndex = next.indexOf(sourceKey)
-        const targetIndex = next.indexOf(targetKey)
-        if (sourceIndex < 0 || targetIndex < 0) return previous
-        const [moved] = next.splice(sourceIndex, 1)
-        next.splice(targetIndex, 0, moved)
+        if (sourceIndex < 0 || sourceIndex === target) return previous
+        const displaced = next[target]
+        next[target] = sourceKey
+        next[sourceIndex] = displaced && displaced !== sourceKey ? displaced : null
         return next
       })
     },
-    [canArrange, ownHandKeys],
+    [canArrange],
   )
 
   const clearDrag = useCallback(() => {
     draggingKeyRef.current = null
-    dragOverKeyRef.current = null
+    dragOverSlotRef.current = null
     setDraggingKey(null)
-    setDragOverKey(null)
+    setDragOverSlot(null)
   }, [])
 
   const handleDragStart = useCallback(
@@ -458,34 +494,35 @@ export function OnlinePage() {
         return
       }
       draggingKeyRef.current = cardKey
-      dragOverKeyRef.current = cardKey
+      dragOverSlotRef.current = Math.max(0, boardSlots.indexOf(cardKey))
       setDraggingKey(cardKey)
+      setDragOverSlot(dragOverSlotRef.current)
       event.dataTransfer.effectAllowed = 'move'
       event.dataTransfer.setData('text/plain', cardKey)
     },
-    [canArrange],
+    [boardSlots, canArrange],
   )
 
   const handleDragOver = useCallback(
-    (event: DragEvent<HTMLButtonElement>, cardKey: string) => {
+    (event: DragEvent<HTMLButtonElement>, slotIndex: number) => {
       if (!canArrange || !draggingKeyRef.current) return
       event.preventDefault()
       event.dataTransfer.dropEffect = 'move'
-      dragOverKeyRef.current = cardKey
-      setDragOverKey(cardKey)
+      dragOverSlotRef.current = slotIndex
+      setDragOverSlot(slotIndex)
     },
     [canArrange],
   )
 
   const handleDrop = useCallback(
-    (event: DragEvent<HTMLButtonElement>, targetKey: string) => {
+    (event: DragEvent<HTMLButtonElement>, targetSlot: number) => {
       if (!canArrange) return
       event.preventDefault()
       const sourceKey = event.dataTransfer.getData('text/plain') || draggingKeyRef.current || ''
-      moveCard(sourceKey, targetKey)
+      moveCardToSlot(sourceKey, targetSlot)
       clearDrag()
     },
-    [canArrange, clearDrag, moveCard],
+    [canArrange, clearDrag, moveCardToSlot],
   )
 
   const handleDragEnd = clearDrag
@@ -495,36 +532,36 @@ export function OnlinePage() {
       if (!canArrange) return
       event.preventDefault()
       draggingKeyRef.current = cardKey
-      dragOverKeyRef.current = cardKey
+      dragOverSlotRef.current = Math.max(0, boardSlots.indexOf(cardKey))
       setDraggingKey(cardKey)
-      setDragOverKey(cardKey)
+      setDragOverSlot(dragOverSlotRef.current)
       event.currentTarget.setPointerCapture(event.pointerId)
     },
-    [canArrange],
+    [boardSlots, canArrange],
   )
 
   const handlePointerMove = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
       if (!canArrange || !draggingKeyRef.current) return
       const hovered = document.elementFromPoint(event.clientX, event.clientY)
-      const cardElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-card-key]') : null
-      const cardKey = cardElement?.dataset.onlineCardKey
-      if (!cardKey || !ownHandKeys.includes(cardKey) || cardKey === dragOverKeyRef.current) return
-      dragOverKeyRef.current = cardKey
-      setDragOverKey(cardKey)
+      const slotElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-slot-index]') : null
+      const slotIndex = Number.parseInt(slotElement?.dataset.onlineSlotIndex || '', 10)
+      if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= MAX_HAND_SLOTS || slotIndex === dragOverSlotRef.current) return
+      dragOverSlotRef.current = slotIndex
+      setDragOverSlot(slotIndex)
     },
-    [canArrange, ownHandKeys],
+    [canArrange],
   )
 
   const handlePointerUp = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
-      if (canArrange && draggingKeyRef.current && dragOverKeyRef.current) {
-        moveCard(draggingKeyRef.current, dragOverKeyRef.current)
+      if (canArrange && draggingKeyRef.current && dragOverSlotRef.current !== null) {
+        moveCardToSlot(draggingKeyRef.current, dragOverSlotRef.current)
       }
       clearDrag()
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     },
-    [canArrange, clearDrag, moveCard],
+    [canArrange, clearDrag, moveCardToSlot],
   )
 
   const handlePointerCancel = useCallback(
@@ -588,8 +625,8 @@ export function OnlinePage() {
   }
 
   function sortOwnHand(mode: 'random' | 'name') {
-    setBoardOrder((previous) => {
-      const current = (previous.length ? previous : ownHandKeys).filter((key) => ownHandKeys.includes(key))
+    setBoardSlots((previous) => {
+      const current = previous.filter((key): key is string => Boolean(key && ownHandKeys.includes(key)))
       const movable = current.filter((key) => !pinnedKeys.has(key))
       if (mode === 'random') {
         for (let index = movable.length - 1; index > 0; index -= 1) {
@@ -603,10 +640,11 @@ export function OnlinePage() {
           return (leftCard?.workName || '').localeCompare(rightCard?.workName || '', 'zh-CN') || (leftCard?.number || 0) - (rightCard?.number || 0)
         })
       }
-      const next = [...current]
+      const next = [...previous]
       let movableIndex = 0
       for (let index = 0; index < next.length; index += 1) {
-        if (!pinnedKeys.has(next[index])) next[index] = movable[movableIndex++]
+        const key = next[index]
+        if (key && !pinnedKeys.has(key)) next[index] = movable[movableIndex++] || null
       }
       return next
     })
@@ -748,8 +786,9 @@ export function OnlinePage() {
               <strong>玩法</strong>
                <span className="muted small">1. 候选牌随机分成两份，双方各选 30 张并互换</span>
                <span className="muted small">2. 双方各从收到的 30 张中 BAN 5 张，剩余各 25 张</span>
-               <span className="muted small">3. 开局排牌 3 分钟：只可调整自己的 3×9 牌区</span>
-               <span className="muted small">4. 空牌或选错会暂停抢牌，由对手选择转来一张牌</span>
+               <span className="muted small">3. 开局排牌 3 分钟；3×9 是 27 个固定可放置槽位，只能调整自己的牌区</span>
+               <span className="muted small">4. 空牌歌曲来自场外 50 首，单次出现后移出空牌池；点击场上任一卡面都不会判错</span>
+               <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
             </div>
             <Link className="btn btn-secondary" to="/admin">
               管理服务器牌组
@@ -884,10 +923,29 @@ export function OnlinePage() {
     )
   }
 
-  const resultMeta = lastResult ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
+  const resultMeta = lastResult?.cardKey ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
   const scores = lastResult?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
   const isOpeningArrange = room.phase === 'arrange'
   const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer)
+  const restSeconds = Math.ceil(restRemaining / 1000)
+  const stageLabel = isOpeningArrange ? '开局排牌' : isResting ? (room.restReason === 'empty' ? '空牌休息' : '休息阶段') : round ? (round.isEmpty ? '空牌回合' : '听歌抢牌') : '对局进行中'
+  const statusText = isOpeningArrange
+    ? `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
+    : isResting
+      ? room.pendingTransfer?.to === room.you
+        ? `休息阶段 · ${restSeconds} 秒内完成交牌`
+        : `休息阶段 · ${restSeconds} 秒后进入下一回合`
+      : myClaim?.correct === false
+        ? room.pendingTransfer?.from === room.you
+          ? '你抢错了，等待对手选择一张牌转给你'
+          : '你抢错了，等待转牌处理'
+        : myClaim?.correct
+          ? '抢牌成功，等待结算'
+          : opponentClaim
+            ? '对手已经出手，等待结算'
+            : round
+              ? `听歌抢牌 · ${Math.ceil(roundRemaining / 1000)} 秒`
+              : '准备下一回合…'
 
   return (
     <div className="online-page">
@@ -905,17 +963,10 @@ export function OnlinePage() {
         </div>
       </section>
 
-      <div className="versus-scorebar">
-        <ScoreCard player={room.players[room.you]} score={scores[room.you]} winner={false} mine />
-        <span className="versus-mark">VS</span>
-        <ScoreCard player={room.players[otherPlayer(room.you)]} score={scores[otherPlayer(room.you)]} winner={false} />
-      </div>
-      <NetworkFairness room={room} compact />
-
       {canArrange ? (
         <div className="arrange-hint" role="status">
           <strong>{isOpeningArrange ? '开局排牌' : '休息阶段'}</strong>
-          <span>只能调整你自己的牌区；最多 3 排、每排 9 列，布局只保存在本机。</span>
+          <span>只能调整你自己的牌区；3×9 是 27 个固定可放置槽位，拖动时显示全部槽位。</span>
         </div>
       ) : null}
       {canArrange ? (
@@ -929,23 +980,7 @@ export function OnlinePage() {
           {pinMode ? <span className="muted small">点击自己的牌固定/取消固定，再使用排序按钮。</span> : null}
         </div>
       ) : null}
-      <div className="status-banner">
-        {isOpeningArrange
-          ? `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
-          : myClaim?.correct === false
-            ? room.pendingTransfer?.from === room.you
-              ? '你抢错了，等待对手选择一张牌转给你'
-              : '你抢错了，等待转牌处理'
-            : myClaim?.correct
-              ? '抢牌成功，等待结算'
-              : opponentClaim
-                ? '对手已经出手，等待结算'
-                : room.pendingTransfer?.to === room.you
-                  ? '请从自己的牌区选择一张牌转给对手'
-                  : round
-                    ? `听歌抢牌 · ${Math.ceil(roundRemaining / 1000)} 秒`
-                    : '准备下一回合…'}
-      </div>
+      <div className="status-banner">{statusText}</div>
 
       {room.pendingTransfer ? (
         <TransferPanel
@@ -957,59 +992,93 @@ export function OnlinePage() {
 
       <section className="panel stack online-game-panel">
         <div className="row spread">
-          <strong>{isOpeningArrange ? '你的起始牌区' : '双方牌区'}</strong>
+          <strong>歌牌棋盘</strong>
           <div className="row">
-            <span className="chip">本回合 {round ? `#${round.roundNo}` : '揭晓'}</span>
+            <span className="chip">{round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
             <button className="btn btn-secondary" type="button" onClick={unlockAudio}>启用音频</button>
           </div>
         </div>
-        <p className="muted small">卡面图片来自当前歌牌数据包；抢牌时点击双方牌区中的对应卡面，空槽点击也会按选错处理。</p>
-        <HandArea
-          title={`你的牌区 · ${ownHandKeys.length}/${MAX_HAND_SLOTS}`}
-          cards={orderedHandCards}
-          mine
-          canArrange={canArrange}
-          pinMode={pinMode}
-          pinnedKeys={pinnedKeys}
-          draggingKey={draggingKey}
-          dragOverKey={dragOverKey}
-          claimable={canClaim}
-          resultKey={lastResult?.cardKey || null}
-          pickedKey={myClaim?.cardKey || null}
-          onCardClick={pinMode && canArrange ? togglePinned : claimCard}
-          onDragStart={handleDragStart}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-          onDragEnd={handleDragEnd}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerCancel}
-        />
-        <HandArea
-          title={`对手牌区 · ${opponentHandKeys.length}/${MAX_HAND_SLOTS}`}
-          cards={opponentHandKeys.map((key) => room.cards.find((card) => card.key === key)).filter((card): card is OnlineCardView => Boolean(card))}
-          claimable={canClaim}
-          resultKey={lastResult?.cardKey || null}
-          pickedKey={opponentClaim?.cardKey || null}
-          onCardClick={claimCard}
-        />
+        <p className="muted small">卡面图片来自服务器歌牌卡面；正常歌曲点击对应卡牌，空牌歌曲点击场上任一卡面均视为成功且不会移出实牌。</p>
+        <div className="online-match-board">
+          <HandArea
+            title={`对手牌区 · ${opponentHandKeys.length}/${MAX_HAND_SLOTS}`}
+            slotCards={opponentHandCards}
+            claimable={canClaim}
+            resultKey={lastResult?.cardKey || null}
+            pickedKey={opponentClaim?.cardKey || null}
+            onCardClick={claimCard}
+          />
+          <div className="online-board-divider" role="status" aria-live="polite">
+            <div className="online-divider-scores">
+              <div><span>对手</span><strong>{scores[otherPlayer(room.you)]}</strong></div>
+              <span className="versus-mark">VS</span>
+              <div><strong>{scores[room.you]}</strong><span>我方</span></div>
+            </div>
+            <div className="online-match-status">
+              <strong>{stageLabel}</strong>
+              <span>{statusText}</span>
+              <span>场上实牌 {room.remainingCardKeys.length} 张 · 空牌池剩余 {room.emptyRemainingCount} 首</span>
+              <span>我方 {ownHandKeys.length} 张 · 对手 {opponentHandKeys.length} 张 · 最多 27 个槽位</span>
+            </div>
+            <NetworkFairness room={room} compact />
+          </div>
+          <HandArea
+            title={`我方牌区 · ${ownHandKeys.length}/${MAX_HAND_SLOTS}`}
+            slotCards={orderedHandCards}
+            mine
+            canArrange={canArrange}
+            pinMode={pinMode}
+            pinnedKeys={pinnedKeys}
+            draggingKey={draggingKey}
+            dragOverSlot={dragOverSlot}
+            claimable={canClaim}
+            resultKey={lastResult?.cardKey || null}
+            pickedKey={myClaim?.cardKey || null}
+            onCardClick={pinMode && canArrange ? togglePinned : claimCard}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            onDragEnd={handleDragEnd}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+          />
+        </div>
       </section>
 
-      {lastResult && resultMeta ? (
+      {lastResult ? (
         <section className="panel cool online-result stack">
           <div className="row spread">
-            <strong>{lastResult.winner ? `${room.players[lastResult.winner]?.nickname || '玩家'} 收取了这张卡` : '本回合无人收取'}</strong>
-            <span className="muted small">{lastResult.reason === 'timeout' ? '时间到' : '抢牌结算'}</span>
+            <strong>
+              {lastResult.isEmpty
+                ? lastResult.winner
+                  ? `${room.players[lastResult.winner]?.nickname || '玩家'} 成功处理空牌歌曲`
+                  : '空牌歌曲结束，场上实牌不变'
+                : lastResult.reason === 'wrong'
+                  ? '选错处理完成，目标卡牌仍在场上'
+                  : lastResult.winner
+                    ? `${room.players[lastResult.winner]?.nickname || '玩家'} 收取了这张卡`
+                    : '本回合无人收取'}
+            </strong>
+            <span className="muted small">{lastResult.reason === 'timeout' ? '时间到' : lastResult.reason === 'wrong' ? '选错' : lastResult.isEmpty ? '空牌结算' : '抢牌结算'}</span>
           </div>
-          <div className="online-result-body">
-            <OnlineCardTile meta={resultMeta} available result />
-            <div className="stack">
-              <span className="muted small">对应歌曲</span>
-              <strong>{lastResult.song.displayName}</strong>
-              <span className="muted small">下一回合即将开始，请继续看着卡面。</span>
+          {resultMeta ? (
+            <div className="online-result-body">
+              <OnlineCardTile meta={resultMeta} available result showNumber={false} />
+              <div className="stack">
+                <span className="muted small">对应歌曲</span>
+                <strong>{lastResult.song.displayName}</strong>
+                <span className="muted small">下一回合将在休息阶段结束后开始。</span>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="online-empty-result">
+              <span className="muted small">空牌歌曲</span>
+              <strong>{lastResult.song.displayName}</strong>
+              <span className="muted small">这首歌来自场上 50 张实牌以外的空牌池，已从空牌池移除且不会再次出现。</span>
+            </div>
+          )}
         </section>
       ) : null}
 
@@ -1146,20 +1215,20 @@ function DraftCardPicker({
 
 interface HandAreaProps {
   title: string
-  cards: OnlineCardView[]
+  slotCards: Array<OnlineCardView | null>
   mine?: boolean
   canArrange?: boolean
   pinMode?: boolean
   pinnedKeys?: Set<string>
   draggingKey?: string | null
-  dragOverKey?: string | null
+  dragOverSlot?: number | null
   claimable?: boolean
   resultKey?: string | null
   pickedKey?: string | null
   onCardClick?: (key: string) => void
   onDragStart?: (event: DragEvent<HTMLButtonElement>, cardKey: string) => void
-  onDragOver?: (event: DragEvent<HTMLButtonElement>, cardKey: string) => void
-  onDrop?: (event: DragEvent<HTMLButtonElement>, cardKey: string) => void
+  onDragOver?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
+  onDrop?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
   onDragEnd?: () => void
   onPointerDown?: (event: PointerEvent<HTMLButtonElement>, cardKey: string) => void
   onPointerMove?: (event: PointerEvent<HTMLButtonElement>) => void
@@ -1169,13 +1238,13 @@ interface HandAreaProps {
 
 function HandArea({
   title,
-  cards,
+  slotCards,
   mine = false,
   canArrange = false,
   pinMode = false,
   pinnedKeys = new Set<string>(),
   draggingKey = null,
-  dragOverKey = null,
+  dragOverSlot = null,
   claimable = false,
   resultKey = null,
   pickedKey = null,
@@ -1190,7 +1259,7 @@ function HandArea({
   onPointerCancel,
 }: HandAreaProps) {
   const draggable = mine && canArrange
-  const emptySlots = Math.max(0, MAX_HAND_SLOTS - cards.length)
+  const showSlots = Boolean(mine && draggingKey)
   return (
     <section className={`hand-area${mine ? ' mine' : ''}`}>
       <div className="row spread hand-area-heading">
@@ -1199,42 +1268,51 @@ function HandArea({
       </div>
       <div className="hand-grid-scroll">
         <div className="online-hand-grid">
-          {cards.map((meta) => (
-            <OnlineCardTile
-              key={meta.key}
-              meta={meta}
-              available={claimable && !canArrange}
-              picked={pickedKey === meta.key}
-              result={resultKey === meta.key}
-              pinned={pinnedKeys.has(meta.key)}
-              stateLabel={canArrange ? '可调整位置' : undefined}
-              draggable={draggable}
-              dragging={draggingKey === meta.key}
-              dropTarget={dragOverKey === meta.key && draggingKey !== meta.key}
-              onDragStart={onDragStart ? (event) => onDragStart(event, meta.key) : undefined}
-              onDragOver={onDragOver ? (event) => onDragOver(event, meta.key) : undefined}
-              onDrop={onDrop ? (event) => onDrop(event, meta.key) : undefined}
-              onDragEnd={onDragEnd}
-              onPointerDown={onPointerDown ? (event) => onPointerDown(event, meta.key) : undefined}
-              onPointerMove={onPointerMove}
-              onPointerUp={onPointerUp}
-              onPointerCancel={onPointerCancel}
-              onClick={onCardClick ? () => onCardClick(meta.key) : undefined}
-            />
-          ))}
-          {Array.from({ length: emptySlots }, (_, index) => (
-            <button
-              key={`empty-${index}`}
-              className="online-empty-slot"
-              type="button"
-              disabled={!claimable || canArrange || !onCardClick}
-              onClick={() => onCardClick?.('')}
-              aria-label="空牌位"
-            >
-              <span>空牌位</span>
-              <small>点击算选错</small>
-            </button>
-          ))}
+          {Array.from({ length: MAX_HAND_SLOTS }, (_, index) => {
+            const meta = slotCards[index] || null
+            if (!meta) {
+              return showSlots ? (
+                <button
+                  key={`empty-${index}`}
+                  className="online-empty-slot visible"
+                  type="button"
+                  data-online-slot-index={index}
+                  onDragOver={onDragOver ? (event) => onDragOver(event, index) : undefined}
+                  onDrop={onDrop ? (event) => onDrop(event, index) : undefined}
+                  aria-label={`放置到第 ${index + 1} 个牌槽`}
+                >
+                  <span>放置到此槽位</span>
+                </button>
+              ) : (
+                <span key={`empty-${index}`} className="online-slot-placeholder" data-online-slot-index={index} aria-hidden="true" />
+              )
+            }
+            return (
+              <OnlineCardTile
+                key={meta.key}
+                meta={meta}
+                available={claimable && !canArrange}
+                showNumber={false}
+                slotIndex={index}
+                picked={pickedKey === meta.key}
+                result={resultKey === meta.key}
+                pinned={pinnedKeys.has(meta.key)}
+                stateLabel={canArrange ? '可调整位置' : undefined}
+                draggable={draggable}
+                dragging={draggingKey === meta.key}
+                dropTarget={dragOverSlot === index && draggingKey !== meta.key}
+                onDragStart={onDragStart ? (event) => onDragStart(event, meta.key) : undefined}
+                onDragOver={onDragOver ? (event) => onDragOver(event, index) : undefined}
+                onDrop={onDrop ? (event) => onDrop(event, index) : undefined}
+                onDragEnd={onDragEnd}
+                onPointerDown={onPointerDown ? (event) => onPointerDown(event, meta.key) : undefined}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerCancel={onPointerCancel}
+                onClick={onCardClick ? () => onCardClick(meta.key) : undefined}
+              />
+            )
+          })}
         </div>
       </div>
     </section>
@@ -1256,16 +1334,22 @@ function TransferPanel({
   const giverKeys = room.players[room.you]?.handCardKeys || []
   const cardByKey = new Map(cards.map((card) => [card.key, card]))
   const giverCards = giverKeys.map((key) => cardByKey.get(key)).filter((card): card is OnlineCardView => Boolean(card))
+  const opponentName = room.players[pending.from]?.nickname || '玩家'
+  const opponentCard = pending.reason === 'opponent_card'
   return (
     <section className={`panel transfer-panel${isGiver ? ' choosing' : ''}`} role="alert">
       <div className="row spread">
         <strong>{isGiver ? '请转给对手一张牌' : '等待对手转来一张牌'}</strong>
-        <span className="chip">8 秒内处理</span>
+        <span className="chip">40 秒内处理</span>
       </div>
       <p className="muted small">
         {isGiver
-          ? `对手（${room.players[pending.from]?.nickname || '玩家'}）刚才选错了，请从你自己的牌区点击一张牌转给对手。`
-          : '本回合暂时停止抢牌；对手选择完成后会恢复。超时未选择时系统会自动随机转牌。'}
+          ? opponentCard
+            ? `你抢到了对手（${opponentName}）牌区中的卡面；请从自己的牌区选择一张牌补给对手。`
+            : `对手（${opponentName}）刚才选错了，请从你自己的牌区点击一张牌转给对手。`
+          : opponentCard
+            ? '目标卡面已从对手牌区移出；等待对手交回一张牌后继续。'
+            : '本回合暂时停止抢牌；对手选择完成后会恢复。超时未选择时系统会自动随机转牌。'}
       </p>
       {isGiver ? (
         <div className="transfer-card-grid">
@@ -1274,6 +1358,7 @@ function TransferPanel({
               key={meta.key}
               meta={meta}
               available
+              showNumber={false}
               stateLabel="点击转牌"
               onClick={() => onGiveCard(meta.key)}
             />

@@ -10,6 +10,8 @@ interface Props {
   picked?: boolean
   result?: boolean
   pinned?: boolean
+  showNumber?: boolean
+  slotIndex?: number
   stateLabel?: string
   draggable?: boolean
   dragging?: boolean
@@ -33,6 +35,8 @@ export function OnlineCardTile({
   picked,
   result,
   pinned = false,
+  showNumber = true,
+  slotIndex,
   stateLabel,
   draggable = false,
   dragging = false,
@@ -78,10 +82,11 @@ export function OnlineCardTile({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
       data-online-card-key={meta.key}
+      data-online-slot-index={slotIndex}
       aria-grabbed={dragging}
-      aria-label={`#${meta.number} ${meta.workName}`}
+      aria-label={`${showNumber ? `#${meta.number} ` : ''}${meta.workName}`}
     >
-      <span className="online-card-number">#{meta.number}</span>
+      {showNumber ? <span className="online-card-number">#{meta.number}</span> : null}
       <div className="online-card-image">
         {imageUrl ? (
           <img src={imageUrl} alt={meta.workName} loading="lazy" decoding="async" />

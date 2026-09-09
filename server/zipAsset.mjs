@@ -7,6 +7,7 @@ const END_OF_CENTRAL_DIRECTORY = 0x06054b50
 const CENTRAL_DIRECTORY_ENTRY = 0x02014b50
 const LOCAL_FILE_HEADER = 0x04034b50
 const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
+const directoryCache = new Map()
 
 /**
  * Read one small media member from a ZIP without inflating the whole server
@@ -16,26 +17,31 @@ const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
 export async function readZipAsset(filePath, requestPath, fallbackName = '', kind = 'audio') {
   const handle = await fs.open(filePath, 'r')
   try {
-    const { size } = await handle.stat()
-    const tailSize = Math.min(size, 0xffff + 22)
-    const tail = Buffer.alloc(tailSize)
-    await readAt(handle, tail, size - tailSize)
-    const eocd = findSignatureFromEnd(tail, END_OF_CENTRAL_DIRECTORY)
-    if (eocd < 0 || eocd + 22 > tail.length) throw new Error('ZIP 目录不存在')
+    const { size, mtimeMs } = await handle.stat()
+    const cached = directoryCache.get(filePath)
+    let members = cached && cached.size === size && cached.mtimeMs === mtimeMs ? cached.members : null
+    if (!members) {
+      const tailSize = Math.min(size, 0xffff + 22)
+      const tail = Buffer.alloc(tailSize)
+      await readAt(handle, tail, size - tailSize)
+      const eocd = findSignatureFromEnd(tail, END_OF_CENTRAL_DIRECTORY)
+      if (eocd < 0 || eocd + 22 > tail.length) throw new Error('ZIP 目录不存在')
 
-    const disk = tail.readUInt16LE(eocd + 4)
-    const directoryDisk = tail.readUInt16LE(eocd + 6)
-    const entries = tail.readUInt16LE(eocd + 10)
-    const directorySize = tail.readUInt32LE(eocd + 12)
-    const directoryOffset = tail.readUInt32LE(eocd + 16)
-    if (disk !== 0 || directoryDisk !== 0 || entries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
-      throw new Error('不支持多磁盘或 Zip64 数据包')
+      const disk = tail.readUInt16LE(eocd + 4)
+      const directoryDisk = tail.readUInt16LE(eocd + 6)
+      const entries = tail.readUInt16LE(eocd + 10)
+      const directorySize = tail.readUInt32LE(eocd + 12)
+      const directoryOffset = tail.readUInt32LE(eocd + 16)
+      if (disk !== 0 || directoryDisk !== 0 || entries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+        throw new Error('不支持多磁盘或 Zip64 数据包')
+      }
+      if (directorySize > 64 * 1024 * 1024) throw new Error('ZIP 目录过大')
+
+      const directory = Buffer.alloc(directorySize)
+      await readAt(handle, directory, directoryOffset)
+      members = parseDirectory(directory, entries)
+      directoryCache.set(filePath, { size, mtimeMs, members })
     }
-    if (directorySize > 64 * 1024 * 1024) throw new Error('ZIP 目录过大')
-
-    const directory = Buffer.alloc(directorySize)
-    await readAt(handle, directory, directoryOffset)
-    const members = parseDirectory(directory, entries)
     const member = findMember(members, requestPath, fallbackName, kind)
     if (!member) throw new Error(`找不到${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源`)
     if (member.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) throw new Error(`${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源过大`)

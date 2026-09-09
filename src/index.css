@@ -112,6 +112,10 @@ img {
   padding-bottom: calc(var(--pad) + env(safe-area-inset-bottom));
 }
 
+main.app-main:has(.online-page) {
+  width: min(1680px, 100%);
+}
+
 .hero {
   margin-bottom: clamp(16px, 3vw, 28px);
 }
@@ -1450,49 +1454,57 @@ img {
 }
 
 .hand-grid-scroll {
-  overflow-x: auto;
+  overflow-x: visible;
   padding: 2px 2px 5px;
 }
 
 .online-hand-grid {
   display: grid;
-  grid-template-columns: repeat(9, minmax(76px, 1fr));
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   grid-template-rows: repeat(3, auto);
   grid-auto-flow: row;
-  gap: 9px;
-  min-width: 760px;
+  gap: clamp(8px, 1vw, 15px);
+  min-width: 0;
 }
 
 .online-empty-slot {
-  display: grid;
+  display: none;
   min-height: 150px;
   place-content: center;
-  gap: 5px;
-  border: 1px dashed rgba(216, 210, 243, 0.32);
+  border: 1px dashed rgba(100, 217, 255, 0.7);
   border-radius: 15px;
-  background: rgba(255, 255, 255, 0.035);
-  color: rgba(216, 210, 243, 0.68);
+  background: linear-gradient(145deg, rgba(100, 217, 255, 0.12), rgba(255, 100, 199, 0.09));
+  color: #c8f5ff;
   font-weight: 800;
   text-align: center;
+  box-shadow: inset 0 0 22px rgba(100, 217, 255, 0.08);
 }
 
-.online-empty-slot small {
-  font-size: 0.68rem;
-  font-weight: 600;
+.online-empty-slot.visible {
+  display: grid;
 }
 
-.online-empty-slot:not(:disabled):hover,
-.online-empty-slot:not(:disabled):focus-visible {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-  color: #ffd8df;
+.online-empty-slot.visible:hover,
+.online-empty-slot.visible:focus-visible {
+  border-color: var(--online-yellow);
+  background: rgba(255, 225, 126, 0.18);
+  color: var(--online-yellow);
   outline: none;
+}
+
+.online-slot-placeholder {
+  display: block;
+  min-width: 0;
+  aspect-ratio: 3 / 4.7;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  pointer-events: none;
 }
 
 .online-card-tile {
   position: relative;
   min-width: 0;
-  padding: 8px;
+  padding: 5px;
   border: 2px solid rgba(36, 50, 74, 0.1);
   border-radius: 15px;
   background: rgba(255, 255, 255, 0.96);
@@ -1648,7 +1660,7 @@ img {
 
 .online-card-image {
   width: 100%;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 3 / 4.35;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -1684,8 +1696,8 @@ img {
 .online-card-title {
   display: -webkit-box;
   overflow: hidden;
-  margin-top: 7px;
-  font-size: 0.86rem;
+  margin-top: 5px;
+  font-size: 0.72rem;
   font-weight: 800;
   line-height: 1.25;
   -webkit-box-orient: vertical;
@@ -1699,9 +1711,9 @@ img {
 
 .online-card-state {
   display: block;
-  margin-top: 4px;
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.62rem;
 }
 
 .online-page .online-card-state {
@@ -1838,7 +1850,89 @@ img {
 }
 
 .online-game-panel {
-  margin-top: 16px;
+  margin-top: 18px;
+  padding: clamp(14px, 2vw, 24px);
+  border-color: rgba(100, 217, 255, 0.24) !important;
+  background: linear-gradient(145deg, rgba(9, 17, 61, 0.9), rgba(28, 16, 67, 0.84)) !important;
+}
+
+.online-game-panel > .row {
+  margin-bottom: 2px;
+}
+
+.online-match-board {
+  display: grid;
+  gap: clamp(14px, 2vw, 24px);
+}
+
+.online-board-divider {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 15px clamp(12px, 3vw, 30px);
+  border-top: 1px solid rgba(100, 217, 255, 0.42);
+  border-bottom: 1px solid rgba(255, 100, 199, 0.42);
+  background:
+    linear-gradient(90deg, transparent, rgba(100, 217, 255, 0.08) 18%, rgba(255, 100, 199, 0.08) 82%, transparent),
+    rgba(6, 11, 42, 0.42);
+  box-shadow: 0 0 28px rgba(100, 217, 255, 0.08), 0 0 28px rgba(255, 100, 199, 0.08);
+}
+
+.online-divider-scores {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) auto minmax(110px, 1fr);
+  align-items: center;
+  gap: 18px;
+  width: min(460px, 100%);
+}
+
+.online-divider-scores > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 9px;
+  color: #fff;
+  font-size: 0.84rem;
+  letter-spacing: 0.08em;
+}
+
+.online-divider-scores > div:last-child {
+  color: var(--online-yellow);
+}
+
+.online-divider-scores strong {
+  font-size: 1.65rem;
+  line-height: 1;
+}
+
+.online-match-status {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px 16px;
+  color: rgba(238, 234, 255, 0.82);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.online-match-status strong {
+  color: #fff;
+  font-size: 1rem;
+  letter-spacing: 0.08em;
+}
+
+.online-board-divider .network-fairness.compact {
+  width: min(720px, 100%);
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.online-board-divider .network-fairness.compact p {
+  font-size: 0.74rem;
+}
+
+.online-board-divider .network-metrics {
+  font-size: 0.7rem;
 }
 
 .transfer-panel {
@@ -1870,6 +1964,29 @@ img {
   grid-template-columns: minmax(110px, 170px) 1fr;
   gap: 16px;
   align-items: center;
+}
+
+.online-empty-result {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border: 1px dashed rgba(255, 225, 126, 0.45);
+  border-radius: 14px;
+  background: rgba(255, 225, 126, 0.08);
+}
+
+.online-empty-result strong {
+  color: var(--online-yellow);
+}
+
+@media (max-width: 800px) {
+  .hand-grid-scroll {
+    overflow-x: auto;
+  }
+
+  .online-hand-grid {
+    min-width: 720px;
+  }
 }
 
 @media (max-width: 480px) {
