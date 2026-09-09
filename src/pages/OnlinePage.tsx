@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import {
@@ -38,6 +38,14 @@ type OnlineNetworkDelta = Extract<OnlineServerMessage, { t: 'network' }>
 
 const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
 const EMPTY_NETWORK_VIEW: OnlineNetworkView = { rttMs: null, jitterMs: null, samples: 0 }
+
+function setCountdownRemaining(setter: Dispatch<SetStateAction<number>>, nextValue: number) {
+  const next = Math.max(0, nextValue)
+  setter((previous) => {
+    if ((previous > 0) === (next > 0) && Math.ceil(previous / 1000) === Math.ceil(next / 1000)) return previous
+    return next
+  })
+}
 
 function readBattleStyle(): BattleStyle {
   try {
@@ -536,7 +544,7 @@ export function OnlinePage() {
         return
       }
       const left = localStart + round.windowMs - Date.now()
-      setRoundRemaining(Math.max(0, left))
+      setCountdownRemaining(setRoundRemaining, left)
     }
     updateRemaining()
     const remainingTimer = window.setInterval(updateRemaining, ONLINE_CLOCK_TICK_MS)
@@ -555,7 +563,7 @@ export function OnlinePage() {
       return
     }
     const localEnd = socket.toLocalTime(room.draft.arrangeEndsAtServerTime)
-    const update = () => setArrangeRemaining(Math.max(0, localEnd - Date.now()))
+    const update = () => setCountdownRemaining(setArrangeRemaining, localEnd - Date.now())
     update()
     const timer = window.setInterval(update, 250)
     return () => window.clearInterval(timer)
@@ -567,7 +575,7 @@ export function OnlinePage() {
       return
     }
     const localEnd = socket.toLocalTime(room.restEndsAtServerTime)
-    const update = () => setRestRemaining(Math.max(0, localEnd - Date.now()))
+    const update = () => setCountdownRemaining(setRestRemaining, localEnd - Date.now())
     update()
     const timer = window.setInterval(update, 250)
     return () => window.clearInterval(timer)
@@ -582,7 +590,7 @@ export function OnlinePage() {
     }
 
     const localLaunchAt = socket.toLocalTime(launchAt)
-    const update = () => setArrangeReadyRemaining(Math.max(0, localLaunchAt - Date.now()))
+    const update = () => setCountdownRemaining(setArrangeReadyRemaining, localLaunchAt - Date.now())
     update()
     const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
 
@@ -603,7 +611,7 @@ export function OnlinePage() {
     }
 
     const localLaunchAt = socket.toLocalTime(launchAt)
-    const update = () => setRestReadyRemaining(Math.max(0, localLaunchAt - Date.now()))
+    const update = () => setCountdownRemaining(setRestReadyRemaining, localLaunchAt - Date.now())
     update()
     const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
 
@@ -1802,8 +1810,43 @@ const HandArea = memo(function HandArea({
   onPointerCancel,
 }: HandAreaProps) {
   const draggable = mine && canArrange
-  const clickable = Boolean((claimable && !canArrange) || giving)
+  const clickable = Boolean((claimable && !canArrange) || giving || (mine && canArrange && pinMode))
   const showSlots = Boolean(mine && draggingKey)
+  const handleCardClick = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      const cardKey = event.currentTarget.dataset.onlineCardKey
+      if (cardKey) onCardClick?.(cardKey)
+    },
+    [onCardClick],
+  )
+  const handleCardDragStart = useCallback(
+    (event: DragEvent<HTMLButtonElement>) => {
+      const cardKey = event.currentTarget.dataset.onlineCardKey
+      if (cardKey) onDragStart?.(event, cardKey)
+    },
+    [onDragStart],
+  )
+  const handleSlotDragOver = useCallback(
+    (event: DragEvent<HTMLButtonElement>) => {
+      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
+      if (Number.isInteger(slotIndex)) onDragOver?.(event, slotIndex)
+    },
+    [onDragOver],
+  )
+  const handleSlotDrop = useCallback(
+    (event: DragEvent<HTMLButtonElement>) => {
+      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
+      if (Number.isInteger(slotIndex)) onDrop?.(event, slotIndex)
+    },
+    [onDrop],
+  )
+  const handleCardPointerDown = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      const cardKey = event.currentTarget.dataset.onlineCardKey
+      if (cardKey) onPointerDown?.(event, cardKey)
+    },
+    [onPointerDown],
+  )
   return (
     <section className={`hand-area${mine ? ' mine' : ''}${giving ? ' giving' : ''}`}>
       <div className="row spread hand-area-heading">
@@ -1821,8 +1864,8 @@ const HandArea = memo(function HandArea({
                   className="online-empty-slot visible"
                   type="button"
                   data-online-slot-index={index}
-                  onDragOver={onDragOver ? (event) => onDragOver(event, index) : undefined}
-                  onDrop={onDrop ? (event) => onDrop(event, index) : undefined}
+                  onDragOver={onDragOver ? handleSlotDragOver : undefined}
+                  onDrop={onDrop ? handleSlotDrop : undefined}
                   aria-label={`放置到第 ${index + 1} 个牌槽`}
                 >
                   <span>放置到此槽位</span>
@@ -1845,15 +1888,15 @@ const HandArea = memo(function HandArea({
                 draggable={draggable}
                 dragging={draggingKey === meta.key}
                 dropTarget={dragOverSlot === index && draggingKey !== meta.key}
-                onDragStart={onDragStart ? (event) => onDragStart(event, meta.key) : undefined}
-                onDragOver={onDragOver ? (event) => onDragOver(event, index) : undefined}
-                onDrop={onDrop ? (event) => onDrop(event, index) : undefined}
+                onDragStart={onDragStart ? handleCardDragStart : undefined}
+                onDragOver={onDragOver ? handleSlotDragOver : undefined}
+                onDrop={onDrop ? handleSlotDrop : undefined}
                 onDragEnd={onDragEnd}
-                onPointerDown={onPointerDown ? (event) => onPointerDown(event, meta.key) : undefined}
+                onPointerDown={onPointerDown ? handleCardPointerDown : undefined}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
                 onPointerCancel={onPointerCancel}
-                onClick={onCardClick ? () => onCardClick(meta.key) : undefined}
+                onClick={clickable && onCardClick ? handleCardClick : undefined}
               />
             )
           })}

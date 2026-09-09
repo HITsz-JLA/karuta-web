@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, type DragEvent, type PointerEvent } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent } from 'react'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import type { CardEntry } from '../types/models'
 import type { OnlineCardView } from '../lib/onlineProtocol'
@@ -24,7 +24,7 @@ interface Props {
   onPointerMove?: (event: PointerEvent<HTMLButtonElement>) => void
   onPointerUp?: (event: PointerEvent<HTMLButtonElement>) => void
   onPointerCancel?: (event: PointerEvent<HTMLButtonElement>) => void
-  onClick?: () => void
+  onClick?: (event: MouseEvent<HTMLButtonElement>) => void
 }
 
 const CARD_IMAGE_CACHE_NAME = 'karuta-card-images-v1'
@@ -80,16 +80,48 @@ async function loadCachedImage(imageUrl: string) {
   return load
 }
 
-function useCachedImageUrl(imageUrl: string | undefined) {
+function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (element: HTMLButtonElement | null) => void] {
+  const imageTargetRef = useRef<HTMLButtonElement | null>(null)
+  const setImageTarget = useCallback((element: HTMLButtonElement | null) => {
+    imageTargetRef.current = element
+  }, [])
+  const [shouldLoad, setShouldLoad] = useState(() => {
+    if (!imageUrl) return false
+    return typeof IntersectionObserver === 'undefined' || cachedImageUrls.has(imageUrl)
+  })
   const [cachedImage, setCachedImage] = useState<{ source: string; url: string } | null>(() => {
     if (!imageUrl) return null
     const memoryUrl = cachedImageUrls.get(imageUrl)
     return memoryUrl ? { source: imageUrl, url: memoryUrl } : null
   })
+
+  useEffect(() => {
+    if (!imageUrl) {
+      setShouldLoad(false)
+      return
+    }
+    if (cachedImageUrls.has(imageUrl) || typeof IntersectionObserver === 'undefined' || !imageTargetRef.current) {
+      setShouldLoad(true)
+      return
+    }
+
+    setShouldLoad(false)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return
+        setShouldLoad(true)
+        observer.disconnect()
+      },
+      { rootMargin: '240px' },
+    )
+    observer.observe(imageTargetRef.current)
+    return () => observer.disconnect()
+  }, [imageUrl])
+
   useEffect(() => {
     let active = true
-    if (!imageUrl) {
-      setCachedImage(null)
+    if (!imageUrl || !shouldLoad) {
+      if (!imageUrl) setCachedImage(null)
       return () => {
         active = false
       }
@@ -108,9 +140,10 @@ function useCachedImageUrl(imageUrl: string | undefined) {
     return () => {
       active = false
     }
-  }, [imageUrl])
-  if (!cachedImage || cachedImage.source !== imageUrl) return undefined
-  return cachedImage.url
+  }, [imageUrl, shouldLoad])
+
+  if (!cachedImage || cachedImage.source !== imageUrl) return [undefined, setImageTarget]
+  return [cachedImage.url, setImageTarget]
 }
 
 /** A board tile deliberately keeps the local karuta card image as its main cue. */
@@ -138,7 +171,7 @@ export const OnlineCardTile = memo(function OnlineCardTile({
   onClick,
 }: Props) {
   const localImageUrl = useObjectUrl(card?.imageBlobKey)
-  const cachedRemoteImageUrl = useCachedImageUrl(meta.imageUrl)
+  const [cachedRemoteImageUrl, imageTargetRef] = useCachedImageUrl(meta.imageUrl)
   const imageUrl = cachedRemoteImageUrl || localImageUrl
   const className = [
     'online-card-tile',
@@ -155,6 +188,7 @@ export const OnlineCardTile = memo(function OnlineCardTile({
 
   return (
     <button
+      ref={imageTargetRef}
       className={className}
       type="button"
       draggable={draggable}

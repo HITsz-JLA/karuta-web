@@ -101,8 +101,9 @@ export function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: H
       }
 
       if (slot.url) releaseAudioSlot(slot)
-      const blobKey = track.song.fullBlobKey || track.song.blobKey
-      const blob = await getBlob(blobKey)
+      // The home player is a 30-second preview. Full-length audio is reserved
+      // for the rest-music path in GameEngine and should never be read here.
+      const blob = await getBlob(track.song.blobKey)
       if (generation !== generationRef.current) return
       if (!blob) throw new Error(`找不到音频：${track.song.fileName}`)
 
@@ -139,7 +140,7 @@ export function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: H
   }, [volume])
 
   useEffect(() => {
-    const generation = ++generationRef.current
+    ++generationRef.current
     cancelTransition()
     isPlayingRef.current = false
     setIsPlaying(false)
@@ -163,20 +164,11 @@ export function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: H
       return
     }
 
-    setIsLoading(true)
-    void loadSlot(current, nextIndex, generation)
-      .then(() => {
-        if (generation !== generationRef.current) return
-        setIsLoading(false)
-        const preloadIndex = (nextIndex + 1) % tracks.length
-        if (next) void loadSlot(next, preloadIndex, generation).catch(() => undefined)
-      })
-      .catch((loadError: unknown) => {
-        if (generation !== generationRef.current) return
-        setIsLoading(false)
-        setError(playbackError(loadError))
-      })
-  }, [cancelTransition, loadSlot, selectedCardId, tracks])
+    // Do not touch IndexedDB until the user explicitly starts playback. This
+    // keeps entering HomePage and changing the preview card cheap, especially
+    // for complete packages that also contain full-length audio.
+    setIsLoading(false)
+  }, [cancelTransition, selectedCardId, tracks])
 
   const beginTransition = useCallback(async () => {
     const current = currentSlotRef.current
