@@ -15,6 +15,7 @@ export interface OnlinePlayerView {
   nickname: string
   connected: boolean
   ready: boolean
+  arrangeReady: boolean
   restReady: boolean
   score: number
   correctClaims: number
@@ -74,6 +75,7 @@ export interface OnlineRoomView {
   remainingCardKeys: string[]
   restEndsAtServerTime: number | null
   restAudioUrl: string | null
+  arrangeReadyStartAtServerTime: number | null
   restReadyStartAtServerTime: number | null
   roundNo: number
   fairness: OnlineFairnessView

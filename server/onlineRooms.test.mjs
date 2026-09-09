@@ -408,6 +408,45 @@ test('both players can ready during rest and start the next round in five second
   }
 })
 
+test('both players can ready during opening arrangement and start the game in twenty seconds', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-arrange-ready-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(room.seats.A.arrangeReady, true)
+    assert.equal(room.arrangeReadyStartAt, null)
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(room.seats.B.arrangeReady, true)
+    assert.ok(room.arrangeReadyStartAt - Date.now() > 19_000)
+    const arranged = latest(hostSocket, 'room').room
+    assert.equal(arranged.arrangeReadyStartAtServerTime, room.arrangeReadyStartAt)
+    assert.equal(arranged.players.A.arrangeReady, true)
+    assert.equal(arranged.players.B.arrangeReady, true)
+
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: false }))
+    assert.equal(room.arrangeReadyStartAt, null)
+    assert.equal(room.seats.A.arrangeReady, false)
+    assert.equal(room.seats.B.arrangeReady, true)
+    assert.ok(room.arrangeTimer)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('correctly claiming a card on the opponent side opens the reverse transfer', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-opponent-transfer-'))
   const manager = new OnlineRoomManager(temp)

@@ -326,6 +326,7 @@ export class OnlineRoomManager {
       socket: session,
       resumeToken,
       ready: false,
+      arrangeReady: false,
       restReady: false,
       score: 0,
       correctClaims: 0,
@@ -444,6 +445,7 @@ class OnlineRoom {
     this.emptyRemainingSongs = []
     this.restSongs = []
     this.restRemainingSongs = []
+    this.arrangeReadyStartAt = null
     this.restReadyStartAt = null
     this.pendingTransfer = null
     this.lastActivity = Date.now()
@@ -467,6 +469,10 @@ class OnlineRoom {
   setReady(session, ready) {
     const playerId = this.playerIdFor(session)
     if (!playerId) return
+    if (this.phase === 'arrange') {
+      this.setArrangeReady(playerId, ready)
+      return
+    }
     if (this.phase === 'playing') {
       this.setRestReady(playerId, ready)
       return
@@ -496,6 +502,23 @@ class OnlineRoom {
     this.sendRoom()
   }
 
+  setArrangeReady(playerId, ready) {
+    if (this.phase !== 'arrange' || !this.arrangeEndsAt || Date.now() >= this.arrangeEndsAt) return
+    const seat = this.seats[playerId]
+    if (!seat) return
+    seat.arrangeReady = ready
+    if (!ready && this.arrangeReadyStartAt) {
+      this.arrangeReadyStartAt = null
+      this.scheduleArrangeStart(Math.max(0, this.arrangeEndsAt - Date.now()))
+    }
+    if (this.seats.A?.arrangeReady && this.seats.B?.arrangeReady && !this.arrangeReadyStartAt) {
+      this.arrangeReadyStartAt = Date.now() + 20_000
+      this.scheduleArrangeStart(20_000)
+    }
+    this.touch()
+    this.sendRoom()
+  }
+
   setRestReady(playerId, ready) {
     const current = this.current
     if (!current?.resolved || !current.restEndsAtServerTime || Date.now() >= current.restEndsAtServerTime || this.pendingTransfer) return
@@ -522,6 +545,7 @@ class OnlineRoom {
       const seat = this.seats[playerId]
       if (!seat) continue
       seat.ready = false
+      seat.arrangeReady = false
       seat.restReady = false
       seat.score = 0
       seat.correctClaims = 0
@@ -543,6 +567,7 @@ class OnlineRoom {
     this.emptyRemainingSongs = []
     this.restSongs = []
     this.restRemainingSongs = []
+    this.arrangeReadyStartAt = null
     this.restReadyStartAt = null
     this.touch()
     this.sendRoom()
@@ -614,6 +639,10 @@ class OnlineRoom {
     this.restRemainingSongs = shuffle(this.restSongs)
     this.phase = 'arrange'
     this.arrangeEndsAt = Date.now() + ARRANGE_WINDOW_MS
+    this.arrangeReadyStartAt = null
+    for (const playerId of ['A', 'B']) {
+      if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
+    }
     this.touch()
     this.sendRoom()
     this.scheduleArrangeStart(ARRANGE_WINDOW_MS)
@@ -653,6 +682,10 @@ class OnlineRoom {
     this.arrangeTimer = null
     this.phase = 'playing'
     this.arrangeEndsAt = null
+    this.arrangeReadyStartAt = null
+    for (const playerId of ['A', 'B']) {
+      if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
+    }
     this.touch()
     this.sendRoom()
     this.scheduleNextRound(600)
@@ -977,6 +1010,20 @@ class OnlineRoom {
     if (!seat || !seat.socket) return
     seat.socket = null
     seat.disconnectedAt = Date.now()
+    if (this.phase === 'arrange') {
+      seat.arrangeReady = false
+      if (this.arrangeReadyStartAt) {
+        this.arrangeReadyStartAt = null
+        this.scheduleArrangeStart(Math.max(0, (this.arrangeEndsAt || Date.now()) - Date.now()))
+      }
+    }
+    if (this.phase === 'playing') {
+      seat.restReady = false
+      if (this.restReadyStartAt && this.current?.restEndsAtServerTime) {
+        this.restReadyStartAt = null
+        this.scheduleNextRound(Math.max(0, this.current.restEndsAtServerTime - Date.now()))
+      }
+    }
     this.touch()
     this.broadcastPeer(playerId, false)
     this.networkChanged()
@@ -1007,11 +1054,13 @@ class OnlineRoom {
     this.restRemainingSongs = []
     this.remaining = new Set(this.cards.map((card) => card.key))
     this.restReadyStartAt = null
+    this.arrangeReadyStartAt = null
     this.scores = EMPTY_SCORES()
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (seat) {
         seat.ready = false
+        seat.arrangeReady = false
         seat.restReady = false
         seat.score = 0
         seat.correctClaims = 0
@@ -1114,6 +1163,7 @@ class OnlineRoom {
       remainingCardKeys: [...this.remaining],
       restEndsAtServerTime: this.current?.restEndsAtServerTime || null,
       restAudioUrl: this.current?.restAudioUrl || null,
+      arrangeReadyStartAtServerTime: this.arrangeReadyStartAt,
       restReadyStartAtServerTime: this.restReadyStartAt,
       roundNo: this.roundNo,
       fairness: this.fairnessView(),
@@ -1130,6 +1180,7 @@ class OnlineRoom {
       nickname: seat.nickname,
       connected: Boolean(seat.socket),
       ready: seat.ready,
+      arrangeReady: seat.arrangeReady,
       restReady: seat.restReady,
       score: seat.score,
       correctClaims: seat.correctClaims,

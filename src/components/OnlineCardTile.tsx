@@ -1,4 +1,4 @@
-import type { DragEvent, PointerEvent } from 'react'
+import { useEffect, useState, type DragEvent, type PointerEvent } from 'react'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import type { CardEntry } from '../types/models'
 import type { OnlineCardView } from '../lib/onlineProtocol'
@@ -27,6 +27,92 @@ interface Props {
   onClick?: () => void
 }
 
+const CARD_IMAGE_CACHE_NAME = 'karuta-card-images-v1'
+const CARD_IMAGE_MEMORY_LIMIT = 96
+const cachedImageUrls = new Map<string, string>()
+const pendingImageLoads = new Map<string, Promise<string>>()
+
+function rememberImageUrl(imageUrl: string, objectUrl: string) {
+  const previous = cachedImageUrls.get(imageUrl)
+  if (previous && previous !== objectUrl) URL.revokeObjectURL(previous)
+  cachedImageUrls.delete(imageUrl)
+  cachedImageUrls.set(imageUrl, objectUrl)
+  while (cachedImageUrls.size > CARD_IMAGE_MEMORY_LIMIT) {
+    const oldest = cachedImageUrls.entries().next().value as [string, string] | undefined
+    if (!oldest) break
+    cachedImageUrls.delete(oldest[0])
+    URL.revokeObjectURL(oldest[1])
+  }
+}
+
+async function loadCachedImage(imageUrl: string) {
+  const memoryUrl = cachedImageUrls.get(imageUrl)
+  if (memoryUrl) {
+    cachedImageUrls.delete(imageUrl)
+    cachedImageUrls.set(imageUrl, memoryUrl)
+    return memoryUrl
+  }
+  const pending = pendingImageLoads.get(imageUrl)
+  if (pending) return pending
+
+  const load = (async () => {
+    try {
+      if (typeof caches === 'undefined') return imageUrl
+      const cache = await caches.open(CARD_IMAGE_CACHE_NAME)
+      let response = await cache.match(imageUrl)
+      if (!response) {
+        response = await fetch(imageUrl, { cache: 'force-cache' })
+        if (!response.ok) return imageUrl
+        await cache.put(imageUrl, response.clone())
+      }
+      const objectUrl = URL.createObjectURL(await response.blob())
+      rememberImageUrl(imageUrl, objectUrl)
+      return objectUrl
+    } catch {
+      // The normal URL remains the safe fallback when Cache Storage is unavailable.
+      return imageUrl
+    }
+  })()
+  pendingImageLoads.set(imageUrl, load)
+  void load.finally(() => {
+    if (pendingImageLoads.get(imageUrl) === load) pendingImageLoads.delete(imageUrl)
+  })
+  return load
+}
+
+function useCachedImageUrl(imageUrl: string | undefined) {
+  const [cachedImage, setCachedImage] = useState<{ source: string; url: string } | null>(() => {
+    if (!imageUrl) return null
+    const memoryUrl = cachedImageUrls.get(imageUrl)
+    return memoryUrl ? { source: imageUrl, url: memoryUrl } : null
+  })
+  useEffect(() => {
+    let active = true
+    if (!imageUrl) {
+      setCachedImage(null)
+      return () => {
+        active = false
+      }
+    }
+    const memoryUrl = cachedImageUrls.get(imageUrl)
+    if (memoryUrl) {
+      setCachedImage({ source: imageUrl, url: memoryUrl })
+      return () => {
+        active = false
+      }
+    }
+    setCachedImage(null)
+    void loadCachedImage(imageUrl).then((nextUrl) => {
+      if (active) setCachedImage({ source: imageUrl, url: nextUrl })
+    })
+    return () => {
+      active = false
+    }
+  }, [imageUrl])
+  if (!cachedImage || cachedImage.source !== imageUrl) return undefined
+  return cachedImage.url
+}
+
 /** A board tile deliberately keeps the local karuta card image as its main cue. */
 export function OnlineCardTile({
   meta,
@@ -52,7 +138,8 @@ export function OnlineCardTile({
   onClick,
 }: Props) {
   const localImageUrl = useObjectUrl(card?.imageBlobKey)
-  const imageUrl = meta.imageUrl || localImageUrl
+  const cachedRemoteImageUrl = useCachedImageUrl(meta.imageUrl)
+  const imageUrl = cachedRemoteImageUrl || localImageUrl
   const className = [
     'online-card-tile',
     available ? 'available' : draggable ? 'arrangeable' : 'claimed',

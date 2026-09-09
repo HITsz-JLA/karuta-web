@@ -1421,7 +1421,23 @@ main.app-main:has(.online-page) {
   right: 3px;
   left: 3px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
+}
+
+.online-select-window .online-card-tile {
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.online-select-window .online-card-title {
+  margin-top: 4px;
+  font-size: 0.64rem;
+  line-height: 1.18;
+}
+
+.online-select-window .online-card-state {
+  margin-top: 2px;
+  font-size: 0.56rem;
 }
 
 .online-board.compact {

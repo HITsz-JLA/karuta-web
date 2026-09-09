@@ -149,6 +149,7 @@ export function OnlinePage() {
   const [opponentClaim, setOpponentClaim] = useState<ClaimState | null>(null)
   const [roundRemaining, setRoundRemaining] = useState(0)
   const [restRemaining, setRestRemaining] = useState(0)
+  const [arrangeReadyRemaining, setArrangeReadyRemaining] = useState(0)
   const [restReadyRemaining, setRestReadyRemaining] = useState(0)
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('idle')
   const [connected, setConnected] = useState(socket.connected)
@@ -171,6 +172,7 @@ export function OnlinePage() {
   const [pinMode, setPinMode] = useState(false)
   const draggingKeyRef = useRef<string | null>(null)
   const dragOverSlotRef = useRef<number | null>(null)
+  const announcedArrangeReadyRef = useRef<number | null>(null)
   const announcedRestReadyRef = useRef<number | null>(null)
   const publishedLayoutRoundRef = useRef<number | null>(null)
   const phaseRef = useRef<OnlineRoomView['phase'] | null>(null)
@@ -463,6 +465,27 @@ export function OnlinePage() {
     const timer = window.setInterval(update, 250)
     return () => window.clearInterval(timer)
   }, [room?.phase, room?.restEndsAtServerTime, socket])
+
+  useEffect(() => {
+    const launchAt = room?.arrangeReadyStartAtServerTime || null
+    if (!launchAt) {
+      announcedArrangeReadyRef.current = null
+      setArrangeReadyRemaining(0)
+      return
+    }
+
+    const localLaunchAt = socket.toLocalTime(launchAt)
+    const update = () => setArrangeReadyRemaining(Math.max(0, localLaunchAt - Date.now()))
+    update()
+    const timer = window.setInterval(update, 100)
+
+    if (announcedArrangeReadyRef.current !== launchAt) {
+      announcedArrangeReadyRef.current = launchAt
+      playReadyCue()
+    }
+
+    return () => window.clearInterval(timer)
+  }, [room?.arrangeReadyStartAtServerTime, socket])
 
   useEffect(() => {
     const launchAt = room?.restReadyStartAtServerTime || null
@@ -836,9 +859,10 @@ export function OnlinePage() {
     if (!socket.send({ t: 'giveCard', cardKey })) setMessage('连接已断开，转牌没有送达')
   }
 
-  function toggleRestReady() {
-    if (!room || !isResting || room.pendingTransfer) return
-    if (!socket.send({ t: 'ready', ready: !me?.restReady })) setMessage('连接已断开，准备状态没有送达')
+  function toggleReady() {
+    if (!room || (!isOpeningArrange && !isResting) || room.pendingTransfer) return
+    const currentReady = isOpeningArrange ? me?.arrangeReady : me?.restReady
+    if (!socket.send({ t: 'ready', ready: !currentReady })) setMessage('连接已断开，准备状态没有送达')
   }
 
   const unlockAudio = useCallback(() => {
@@ -1046,7 +1070,7 @@ export function OnlinePage() {
                <span className="muted small">3. 开局排牌 3 分钟；3×11 是 33 个固定可放置槽位，只能调整自己的牌区</span>
                <span className="muted small">4. 空牌歌曲来自场外 20 首，单次出现后移出空牌池；点击场上任一卡面都不会判错</span>
                <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
-               <span className="muted small">6. 休息阶段双方可提前准备；双方准备后高亮提示并在 5 秒后开始下一回合</span>
+               <span className="muted small">6. 开局排牌和休息阶段都可提前准备；开局双方准备后 20 秒进入游戏，休息阶段双方准备后 5 秒进入下一回合</span>
             </div>
             <Link className="btn btn-secondary" to="/admin">
               管理服务器牌组
@@ -1186,13 +1210,21 @@ export function OnlinePage() {
   const isOpeningArrange = room.phase === 'arrange'
   const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer)
   const restSeconds = Math.ceil(restRemaining / 1000)
+  const arrangeReadySeconds = Math.ceil(arrangeReadyRemaining / 1000)
   const restReadySeconds = Math.ceil(restReadyRemaining / 1000)
+  const readyRemaining = isOpeningArrange ? arrangeReadyRemaining : restReadyRemaining
+  const readySeconds = isOpeningArrange ? arrangeReadySeconds : restReadySeconds
   const stageLabel = isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
   const isGivingCard = Boolean(room.pendingTransfer?.to === room.you)
+  const isReadyWindow = isOpeningArrange || isResting
   const restReady = Boolean(me?.restReady)
   const opponentRestReady = Boolean(opponent?.restReady)
+  const windowReady = isOpeningArrange ? Boolean(me?.arrangeReady) : restReady
+  const opponentWindowReady = isOpeningArrange ? Boolean(opponent?.arrangeReady) : opponentRestReady
   const statusText = isOpeningArrange
-    ? `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
+    ? arrangeReadyRemaining > 0
+      ? `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
+      : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
     : isResting
       ? restReadyRemaining > 0
         ? `双方已准备 · ${restReadySeconds} 秒后开始下一回合`
@@ -1285,15 +1317,15 @@ export function OnlinePage() {
                 <div><strong>{scores[room.you]}</strong><span>我方</span></div>
               </div>
             </section>
-            <section className={`online-sidebar-card online-phase-panel${isResting ? ' resting' : ''}${restReadyRemaining > 0 ? ' ready-countdown' : ''}`} role="status" aria-live="polite">
+            <section className={`online-sidebar-card online-phase-panel${isResting ? ' resting' : ''}${readyRemaining > 0 ? ' ready-countdown' : ''}`} role="status" aria-live="polite">
               <span className="online-phase-label">{stageLabel}</span>
               <strong className="online-phase-count">
-                {isResting
-                  ? `${restReadyRemaining > 0 ? restReadySeconds : restSeconds} 秒`
-                  : round
-                    ? `${Math.ceil(roundRemaining / 1000)} 秒`
-                    : isOpeningArrange
-                      ? `${Math.ceil(arrangeRemaining / 1000)} 秒`
+                {isOpeningArrange
+                  ? `${arrangeReadyRemaining > 0 ? arrangeReadySeconds : Math.ceil(arrangeRemaining / 1000)} 秒`
+                  : isResting
+                    ? `${restReadyRemaining > 0 ? restReadySeconds : restSeconds} 秒`
+                    : round
+                      ? `${Math.ceil(roundRemaining / 1000)} 秒`
                       : '—'}
               </strong>
               <p>{statusText}</p>
@@ -1304,27 +1336,27 @@ export function OnlinePage() {
                 <span>对手手牌 <strong>{opponentHandKeys.length}</strong> 张</span>
                 <span>双方牌区均为 3×11 固定槽位</span>
             </section>
-            {isResting ? (
+            {isReadyWindow ? (
               <div className="online-ready-row">
-                <strong>提前准备</strong>
+                <strong>{isOpeningArrange ? '准备开局' : '提前准备'}</strong>
                 <div className="online-ready-status">
-                  <span className={restReady ? 'ready' : 'muted'}>{restReady ? '你已准备' : '你尚未准备'}</span>
-                  <span className={opponentRestReady ? 'ready' : 'muted'}>{opponentRestReady ? '对手已准备' : '等待对手准备'}</span>
+                  <span className={windowReady ? 'ready' : 'muted'}>{windowReady ? '你已准备' : '你尚未准备'}</span>
+                  <span className={opponentWindowReady ? 'ready' : 'muted'}>{opponentWindowReady ? '对手已准备' : '等待对手准备'}</span>
                 </div>
-                {room.pendingTransfer ? (
+                {room.pendingTransfer && isResting ? (
                   <span className="muted small">完成交牌后才能提前准备</span>
                 ) : (
-                  <button className={`btn btn-secondary online-ready-button${restReady ? ' active' : ''}`} type="button" onClick={toggleRestReady}>
-                    {restReady ? (restReadyRemaining > 0 ? `已准备 · ${restReadySeconds} 秒` : '取消准备') : '准备下一回合'}
+                  <button className={`btn btn-secondary online-ready-button${windowReady ? ' active' : ''}`} type="button" onClick={toggleReady}>
+                    {windowReady ? (readyRemaining > 0 ? `已准备 · ${readySeconds} 秒` : '取消准备') : isOpeningArrange ? '准备开始游戏' : '准备下一回合'}
                   </button>
                 )}
               </div>
             ) : null}
-            {restReadyRemaining > 0 ? (
+            {readyRemaining > 0 ? (
               <div className="online-ready-launch" role="alert">
                 <span>双方已准备</span>
-                <strong>{restReadySeconds}</strong>
-                <span>秒后开始</span>
+                <strong>{readySeconds}</strong>
+                <span>{isOpeningArrange ? '秒后开始游戏' : '秒后开始下一回合'}</span>
               </div>
             ) : null}
             {canArrange ? (
@@ -1424,9 +1456,9 @@ function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: Virtual
     return () => observer.disconnect()
   }, [])
 
-  const columns = viewport.width >= 560 ? 3 : 2
-  const cardWidth = Math.max(120, (viewport.width - (columns - 1) * 10 - 6) / columns)
-  const rowHeight = Math.ceil(cardWidth * 1.34 + 98)
+  const columns = viewport.width >= 720 ? 5 : viewport.width >= 480 ? 4 : viewport.width >= 320 ? 3 : 2
+  const cardWidth = Math.max(92, (viewport.width - (columns - 1) * 8 - 6) / columns)
+  const rowHeight = Math.ceil(cardWidth * 1.45 + 58)
   const rowCount = Math.ceil(cards.length / columns)
   const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
   const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
