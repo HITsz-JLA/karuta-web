@@ -7,13 +7,8 @@ import multer from 'multer'
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url))
 const projectDir = path.resolve(serverDir, '..')
-const dataDir = path.resolve(projectDir, process.env.KARUTA_DATA_DIR || 'data-packages')
-const tempDir = path.join(dataDir, '.tmp')
 const distDir = path.join(projectDir, 'dist')
-const port = Number(process.env.PORT || 8787)
-const host = process.env.HOST || '0.0.0.0'
 const sessionTtlMs = 8 * 60 * 60 * 1000
-const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
 
 async function loadDotEnv() {
   const envPath = path.join(projectDir, '.env')
@@ -34,6 +29,13 @@ async function loadDotEnv() {
 }
 
 await loadDotEnv()
+
+const dataDir = path.resolve(projectDir, process.env.KARUTA_DATA_DIR || 'data-packages')
+const tempDir = path.join(dataDir, '.tmp')
+const metadataDir = path.join(dataDir, '.metadata')
+const port = Number(process.env.PORT || 8787)
+const host = process.env.HOST || '0.0.0.0'
+const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
 
 async function getAdminPassword() {
   const configured = process.env.ADMIN_PASSWORD?.trim()
@@ -59,6 +61,7 @@ async function getAdminPassword() {
 
 await fs.mkdir(dataDir, { recursive: true })
 await fs.mkdir(tempDir, { recursive: true })
+await fs.mkdir(metadataDir, { recursive: true })
 const adminPassword = await getAdminPassword()
 const sessions = new Map()
 
@@ -105,16 +108,57 @@ function requireAdmin(request, response, next) {
 
 function packageNameFromUpload(originalName) {
   const originalBase = path.basename(originalName || 'package.zip')
-  const normalized = originalBase.replace(/[^\p{L}\p{N}._() -]/gu, '_').trim() || 'package'
-  return normalized.toLowerCase().endsWith('.zip') ? normalized : `${normalized}.zip`
+  const normalized = originalBase.replace(/[^\p{L}\p{N}._() -]/gu, '_').trim()
+  const visibleName = normalized.replace(/^\.+/, '').trim() || 'package'
+  return visibleName.toLowerCase().endsWith('.zip') ? visibleName : `${visibleName}.zip`
 }
 
 function packagePathFromId(id) {
-  const decoded = decodeURIComponent(id)
+  let decoded
+  try {
+    decoded = decodeURIComponent(id)
+  } catch {
+    return null
+  }
   if (!decoded || decoded !== path.basename(decoded) || !decoded.toLowerCase().endsWith('.zip')) return null
   const resolved = path.resolve(dataDir, decoded)
   if (!resolved.startsWith(`${dataDir}${path.sep}`)) return null
   return resolved
+}
+
+function isPackageMode(mode) {
+  return mode === 'full' || mode === 'lite'
+}
+
+function packageMetadataPath(fileName) {
+  return path.join(metadataDir, `${fileName}.json`)
+}
+
+async function readPackageMode(fileName) {
+  try {
+    const text = await fs.readFile(packageMetadataPath(fileName), 'utf8')
+    const metadata = JSON.parse(text)
+    return isPackageMode(metadata?.mode) ? metadata.mode : 'lite'
+  } catch (error) {
+    if (error?.code !== 'ENOENT') console.error(`无法读取数据包元数据：${fileName}`, error)
+    return 'lite'
+  }
+}
+
+async function writePackageMetadata(fileName, mode) {
+  const metadataPath = packageMetadataPath(fileName)
+  const temporaryPath = `${metadataPath}.${crypto.randomUUID()}.tmp`
+  try {
+    await fs.writeFile(
+      temporaryPath,
+      JSON.stringify({ format: 'karuta-web', version: 1, mode }, null, 2) + '\n',
+      { encoding: 'utf8', mode: 0o600 },
+    )
+    await fs.rename(temporaryPath, metadataPath)
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 async function listPackages() {
@@ -130,6 +174,7 @@ async function listPackages() {
       fileName: entry.name,
       size: stats.size,
       updatedAt: stats.mtimeMs,
+      mode: await readPackageMode(entry.name),
     })
   }
   return packages.sort((left, right) => right.updatedAt - left.updatedAt)
@@ -226,9 +271,16 @@ app.get('/api/packages/:id/download', async (request, response, next) => {
 
 app.post('/api/packages', requireAdmin, upload.single('file'), async (request, response, next) => {
   const uploadedPath = request.file?.path
+  let finalPath = null
+  let moved = false
   try {
     if (!request.file) {
       response.status(400).json({ message: '请选择 ZIP 数据包' })
+      return
+    }
+    const mode = request.body?.mode
+    if (!isPackageMode(mode)) {
+      response.status(400).json({ message: '请选择数据包模式：完整包或精简包' })
       return
     }
     if (!(await isZipFile(uploadedPath))) {
@@ -239,7 +291,7 @@ app.post('/api/packages', requireAdmin, upload.single('file'), async (request, r
     const safeName = packageNameFromUpload(request.file.originalname)
     const parsed = path.parse(safeName)
     let finalName = safeName
-    let finalPath = path.join(dataDir, finalName)
+    finalPath = path.join(dataDir, finalName)
     try {
       await fs.access(finalPath)
       finalName = `${parsed.name}-${Date.now()}${parsed.ext}`
@@ -249,6 +301,8 @@ app.post('/api/packages', requireAdmin, upload.single('file'), async (request, r
     }
 
     await fs.rename(uploadedPath, finalPath)
+    moved = true
+    await writePackageMetadata(finalName, mode)
     const stats = await fs.stat(finalPath)
     response.status(201).json({
       package: {
@@ -257,10 +311,12 @@ app.post('/api/packages', requireAdmin, upload.single('file'), async (request, r
         fileName: finalName,
         size: stats.size,
         updatedAt: stats.mtimeMs,
+        mode,
       },
     })
   } catch (error) {
     if (uploadedPath) await fs.rm(uploadedPath, { force: true }).catch(() => undefined)
+    if (moved && finalPath) await fs.rm(finalPath, { force: true }).catch(() => undefined)
     next(error)
   }
 })

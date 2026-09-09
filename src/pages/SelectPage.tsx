@@ -69,13 +69,12 @@ export function SelectPage() {
       return
     }
 
-    const byNumber = new Map(deck.cards.map((card) => [card.number, card]))
     const found: CardEntry[] = []
     const missing: number[] = []
 
     for (const num of numbers) {
-      const card = byNumber.get(num)
-      if (card) found.push(card)
+      const matches = deck.cards.filter((card) => card.number === num)
+      if (matches.length) found.push(...matches)
       else missing.push(num)
     }
 

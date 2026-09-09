@@ -6,7 +6,7 @@ import { cardsToCsv, withBom } from '../lib/csv'
 import { buildPrintableCards, downloadBlob, exportPrintPdf } from '../lib/printPdf'
 import { createId, putBlob } from '../lib/storage'
 import { exportDeckZip } from '../lib/zipPackage'
-import type { CardEntry, PrintMode, SongEntry } from '../types/models'
+import type { CardEntry, PackageMode, PrintMode, SongEntry } from '../types/models'
 
 function blankCard(number: number): CardEntry {
   return {
@@ -112,18 +112,20 @@ export function EditorPage() {
         fileName: file.name,
         displayName: file.name.replace(/\.[^.]+$/, ''),
         blobKey: key,
+        fullBlobKey: key,
       })
     }
     setDraft({ ...draft, songs })
   }
 
-  async function exportZip() {
+  async function exportZip(mode: PackageMode) {
     if (!deck) return
     setBusy(true)
     try {
-      const blob = await exportDeckZip(deck)
-      downloadBlob(blob, `${deck.name}.zip`)
-      setStatus('ZIP 已导出')
+      const blob = await exportDeckZip(deck, mode)
+      const suffix = mode === 'full' ? '-full' : '-lite'
+      downloadBlob(blob, `${deck.name}${suffix}.zip`)
+      setStatus(mode === 'full' ? '完整 ZIP 已导出' : '精简 ZIP 已导出')
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '导出失败')
     } finally {
@@ -199,8 +201,11 @@ export function EditorPage() {
         <button className="btn btn-secondary" type="button" onClick={() => void exportCsv()} disabled={busy}>
           导出 CSV
         </button>
-        <button className="btn btn-secondary" type="button" onClick={() => void exportZip()} disabled={busy}>
-          导出 ZIP
+        <button className="btn btn-secondary" type="button" onClick={() => void exportZip('lite')} disabled={busy}>
+          导出精简 ZIP
+        </button>
+        <button className="btn btn-secondary" type="button" onClick={() => void exportZip('full')} disabled={busy}>
+          导出完整 ZIP
         </button>
         <button className="btn btn-secondary" type="button" onClick={() => void exportPdf('STANDARD')} disabled={busy}>
           标准打印 PDF

@@ -8,6 +8,7 @@ import {
   type ServerPackage,
   uploadServerPackage,
 } from '../lib/serverPackages'
+import type { PackageMode } from '../types/models'
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
@@ -19,6 +20,7 @@ export function AdminPage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [authenticated, setAuthenticated] = useState(false)
   const [password, setPassword] = useState('')
+  const [packageMode, setPackageMode] = useState<PackageMode>('full')
   const [packages, setPackages] = useState<ServerPackage[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -81,7 +83,7 @@ export function AdminPage() {
     setBusy(true)
     setMessage(null)
     try {
-      await uploadServerPackage(file)
+      await uploadServerPackage(file, packageMode)
       await refresh()
       setMessage(`已上传服务器数据包：${file.name}`)
     } catch (error) {
@@ -131,6 +133,19 @@ export function AdminPage() {
               </button>
             </div>
             <p className="muted small">上传的 ZIP 会保存到服务器本地 data-packages 目录，普通用户只能读取。</p>
+            <div className="field">
+              <label htmlFor="packageMode">数据包模式</label>
+              <select
+                id="packageMode"
+                value={packageMode}
+                onChange={(event) => setPackageMode(event.target.value as PackageMode)}
+                disabled={busy}
+              >
+                <option value="full">完整包（对局片段 + 休息完整歌曲）</option>
+                <option value="lite">精简包（只保留 30 秒片段）</option>
+              </select>
+              <span className="muted small">模式会保存到服务器元数据；服务器选择会优先于 ZIP 内 manifest。</span>
+            </div>
             <div className="row">
               <button className="btn btn-primary" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>
                 选择 ZIP 数据包
@@ -166,7 +181,8 @@ export function AdminPage() {
                 <div>
                   <strong>{item.name}</strong>
                   <div className="muted small">
-                    {formatBytes(item.size)} · {new Date(item.updatedAt).toLocaleString()}
+                    {formatBytes(item.size)} · {item.mode === 'full' ? '完整包' : '精简包'} ·{' '}
+                    {new Date(item.updatedAt).toLocaleString()}
                   </div>
                 </div>
               </div>

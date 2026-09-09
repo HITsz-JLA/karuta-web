@@ -13,6 +13,13 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
+function readableImportError(error: unknown) {
+  if (error instanceof Error && /connection is closing|transactioninactiveerror|invalidstateerror/i.test(error.message)) {
+    return '浏览器本地数据连接已关闭，请关闭本页面的其他标签后按 Ctrl+F5 重试；若仍失败，请清理本站点的 IndexedDB 后重新导入'
+  }
+  return error instanceof Error ? error.message : '导入失败'
+}
+
 export function HomePage() {
   const navigate = useNavigate()
   const { decks, loading, refresh } = useDeckList()
@@ -48,7 +55,9 @@ export function HomePage() {
 
   const importProgressLabel =
     importProgress?.stage === 'reading'
-      ? '正在读取 ZIP…'
+      ? importProgress.total
+        ? `正在分块读取 ZIP ${Math.min(Math.ceil(importProgress.current / 1024 / 1024), Math.ceil(importProgress.total / 1024 / 1024))}/${Math.ceil(importProgress.total / 1024 / 1024)} MB`
+        : '正在读取 ZIP…'
       : importProgress?.stage === 'parsing'
         ? '正在解析 CSV…'
         : importProgress?.stage === 'resources'
@@ -68,14 +77,22 @@ export function HomePage() {
     setImportProgress(null)
     setMessage(null)
     try {
-      const blob = await downloadServerPackage(serverPackage.id)
+      setImportProgress({ stage: 'reading', current: 0, total: serverPackage.size, fileName: serverPackage.fileName })
+      const blob = await downloadServerPackage(serverPackage.id, serverPackage.size, ({ loaded, total }) => {
+        setImportProgress({ stage: 'reading', current: loaded, total, fileName: serverPackage.fileName })
+      })
       const file = new File([blob], serverPackage.fileName, { type: 'application/zip' })
-      const imported = await importDeckZip(file, serverPackage.name, (progress) => setImportProgress(progress))
+      const imported = await importDeckZip(
+        file,
+        serverPackage.name,
+        (progress) => setImportProgress(progress),
+        serverPackage.mode,
+      )
       await refresh()
       setSelectedId(imported.id)
       setMessage(`已导入：${imported.name}`)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '导入失败')
+      setMessage(readableImportError(error))
     } finally {
       setBusy(false)
       setImportProgress(null)
@@ -166,7 +183,8 @@ export function HomePage() {
                     <div>
                       <strong>{serverPackage.name}</strong>
                       <div className="muted small">
-                        {formatBytes(serverPackage.size)} · {new Date(serverPackage.updatedAt).toLocaleString()}
+                        {formatBytes(serverPackage.size)} · {serverPackage.mode === 'full' ? '完整包' : '精简包'} ·{' '}
+                        {new Date(serverPackage.updatedAt).toLocaleString()}
                       </div>
                     </div>
                     <button

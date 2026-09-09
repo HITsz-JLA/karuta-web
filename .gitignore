@@ -15,6 +15,7 @@ dist-ssr
 data-packages/*.zip
 data-packages/.admin-password
 data-packages/.tmp/
+data-packages/.metadata/
 
 # Editor directories and files
 .vscode/*

@@ -54,7 +54,14 @@ export function useDeck(deckId: string | undefined) {
 
   const persist = useCallback(async (next: DeckRecord) => {
     await saveDeck(next)
-    setDeck({ ...next, updatedAt: Date.now(), cards: next.cards.map((card, i) => ({ ...card, number: i + 1 })) })
+    setDeck({
+      ...next,
+      updatedAt: Date.now(),
+      cards: next.cards.map((card, index) => ({
+        ...card,
+        number: Number.isFinite(card.number) && card.number > 0 ? card.number : index + 1,
+      })),
+    })
   }, [])
 
   const remove = useCallback(async (deleteBlobs = true) => {

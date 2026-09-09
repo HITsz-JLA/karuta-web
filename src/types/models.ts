@@ -1,5 +1,7 @@
 export type FailureMode = 'PASS' | 'SKIP'
 
+export type PackageMode = 'full' | 'lite'
+
 export type RoundState =
   | 'IDLE'
   | 'CARD_SELECTED'
@@ -17,11 +19,13 @@ export interface SongEntry {
   fileName: string
   displayName: string
   blobKey: string
+  /** Optional full-length source used by rest music in complete packages. */
+  fullBlobKey?: string
 }
 
 export interface CardEntry {
   id: string
-  /** 1-based deck order number for fast entry */
+  /** Source/display number for fast entry; imports preserve this value. */
   number: number
   imageName: string
   imageBlobKey: string | null

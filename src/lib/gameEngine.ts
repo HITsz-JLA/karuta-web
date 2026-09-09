@@ -25,6 +25,7 @@ export class AudioController {
   private objectUrl: string | null = null
   private limitTimer: number | null = null
   private onEnded: (() => void) | null = null
+  private requestId = 0
 
   constructor() {
     this.audio.preload = 'auto'
@@ -41,15 +42,19 @@ export class AudioController {
     return this.audio.volume
   }
 
-  async playSong(song: SongEntry, volume: number, limitSeconds?: number): Promise<void> {
+  async playSong(song: SongEntry, volume: number, limitSeconds?: number, preferFull = false): Promise<void> {
     this.stop()
-    const blob = await getBlob(song.blobKey)
+    const requestId = this.requestId
+    const blobKey = preferFull && song.fullBlobKey ? song.fullBlobKey : song.blobKey
+    const blob = await getBlob(blobKey)
+    if (requestId !== this.requestId) return
     if (!blob) throw new Error(`找不到音频：${song.fileName}`)
 
     this.objectUrl = URL.createObjectURL(blob)
     this.audio.src = this.objectUrl
     this.setVolume(volume)
     await this.audio.play()
+    if (requestId !== this.requestId) return
 
     if (limitSeconds && limitSeconds > 0) {
       const effectiveLimit = Math.min(limitSeconds, MAX_PLAYBACK_SECONDS)
@@ -69,6 +74,7 @@ export class AudioController {
   }
 
   stop() {
+    this.requestId += 1
     if (this.limitTimer != null) {
       window.clearTimeout(this.limitTimer)
       this.limitTimer = null
@@ -168,6 +174,7 @@ export class GameEngine {
   prepareNextRound() {
     if (this.roundState === 'GAME_OVER') return
     if (this.roundState === 'REST_MUSIC' || this.roundState === 'ROUND_COMPLETE') {
+      this.playSession += 1
       this.audio.stop()
       this.isRestPlaying = false
       this.roundState = 'IDLE'
@@ -204,13 +211,13 @@ export class GameEngine {
   }
 
   private async playCurrentSong() {
+    const session = ++this.playSession
     if (!this.currentSong) {
       this.roundState = 'WAITING_RESULT'
       this.emit()
       return
     }
 
-    const session = ++this.playSession
     this.playbackDuration = Math.min(this.randomDuration(), MAX_PLAYBACK_SECONDS)
     this.roundState = 'MUSIC_PLAYING'
     this.emit()
@@ -224,6 +231,7 @@ export class GameEngine {
     try {
       await this.audio.playSong(this.currentSong, this.volume, this.playbackDuration)
     } catch (error) {
+      if (session !== this.playSession) return
       this.error = error instanceof Error ? error.message : '播放失败'
       this.roundState = 'WAITING_RESULT'
       this.emit()
@@ -279,17 +287,24 @@ export class GameEngine {
     const song = this.pickRandom(this.restPool)
     if (!song) return
 
+    const restSession = this.playSession
     try {
       this.isRestPlaying = true
-      const restSession = this.playSession
       this.audio.setOnEnded(() => {
         if (restSession !== this.playSession) return
         this.isRestPlaying = false
         this.emit()
       })
       this.emit()
-      await this.audio.playSong(song, this.volume * REST_VOLUME_FACTOR, MAX_PLAYBACK_SECONDS)
+      await this.audio.playSong(
+        song,
+        this.volume * REST_VOLUME_FACTOR,
+        song.fullBlobKey ? undefined : MAX_PLAYBACK_SECONDS,
+        Boolean(song.fullBlobKey),
+      )
+      if (restSession !== this.playSession) return
     } catch {
+      if (restSession !== this.playSession) return
       this.isRestPlaying = false
       this.emit()
     }
