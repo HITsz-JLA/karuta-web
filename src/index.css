@@ -876,6 +876,77 @@ img {
   font-size: 0.88rem;
 }
 
+.arrange-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(100, 217, 255, 0.24);
+  border-radius: 14px;
+  background: rgba(6, 11, 42, 0.36);
+}
+
+.online-page .arrange-toolbar .btn.active {
+  border-color: var(--online-yellow);
+  background: rgba(255, 225, 126, 0.18);
+  color: var(--online-yellow);
+}
+
+.draft-selection-summary {
+  align-items: end;
+}
+
+.draft-selection-summary p {
+  margin: 0;
+}
+
+.draft-panel {
+  margin-top: 16px;
+}
+
+.draft-panel h2 {
+  margin: 0 0 5px;
+  color: #fff;
+  font-size: clamp(1.15rem, 2vw, 1.45rem);
+}
+
+.draft-progress {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 18px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 225, 126, 0.24);
+  border-radius: 12px;
+  background: rgba(255, 225, 126, 0.08);
+  color: #fff4bb;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.draft-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  max-height: min(66dvh, 720px);
+  overflow: auto;
+  padding: 3px;
+}
+
+@media (min-width: 560px) {
+  .draft-card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 940px) {
+  .draft-card-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
 .online-lobby-grid {
   display: grid;
   gap: 16px;
@@ -960,6 +1031,69 @@ img {
   overflow: auto;
 }
 
+.hand-area {
+  display: grid;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(6, 11, 42, 0.36);
+}
+
+.hand-area.mine {
+  border-color: rgba(255, 225, 126, 0.36);
+  background: linear-gradient(135deg, rgba(255, 225, 126, 0.09), rgba(255, 100, 199, 0.06));
+}
+
+.hand-area-heading {
+  min-height: 25px;
+}
+
+.hand-area-heading strong {
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+
+.hand-grid-scroll {
+  overflow-x: auto;
+  padding: 2px 2px 5px;
+}
+
+.online-hand-grid {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(76px, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: row;
+  gap: 9px;
+  min-width: 760px;
+}
+
+.online-empty-slot {
+  display: grid;
+  min-height: 150px;
+  place-content: center;
+  gap: 5px;
+  border: 1px dashed rgba(216, 210, 243, 0.32);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.035);
+  color: rgba(216, 210, 243, 0.68);
+  font-weight: 800;
+  text-align: center;
+}
+
+.online-empty-slot small {
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.online-empty-slot:not(:disabled):hover,
+.online-empty-slot:not(:disabled):focus-visible {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: #ffd8df;
+  outline: none;
+}
+
 .online-card-tile {
   position: relative;
   min-width: 0;
@@ -1034,6 +1168,11 @@ img {
 .online-card-tile.picked {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(47, 125, 74, 0.13);
+}
+
+.online-page .online-card-tile.pinned {
+  border-color: var(--online-blue);
+  box-shadow: 0 0 0 2px rgba(100, 217, 255, 0.18), 0 8px 20px rgba(100, 217, 255, 0.15);
 }
 
 .online-card-tile.claimed {
@@ -1264,6 +1403,26 @@ img {
 
 .online-game-panel {
   margin-top: 16px;
+}
+
+.transfer-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  border-color: rgba(255, 139, 157, 0.44) !important;
+  background: linear-gradient(120deg, rgba(255, 139, 157, 0.13), rgba(255, 225, 126, 0.08)) !important;
+}
+
+.transfer-panel.choosing {
+  border-color: rgba(255, 225, 126, 0.58) !important;
+}
+
+.transfer-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+  max-height: 310px;
+  overflow: auto;
 }
 
 .online-result {

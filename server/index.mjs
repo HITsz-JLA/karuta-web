@@ -391,7 +391,7 @@ function audioMime(fileName) {
 }
 
 const httpServer = createServer(app)
-const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
+const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
 
 function pingWebsocket(socket) {
   if (socket.readyState !== 1) return

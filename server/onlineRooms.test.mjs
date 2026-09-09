@@ -25,6 +25,10 @@ function card(number, name) {
   }
 }
 
+function candidateCards(count = 60) {
+  return Array.from({ length: count }, (_, index) => card(index + 1, `作品${index + 1}`))
+}
+
 function latest(socket, type) {
   return [...socket.messages].reverse().find((message) => message.t === type)
 }
@@ -38,6 +42,38 @@ function primeNetwork(manager, sessions, rttA = 20, rttB = 20) {
 
 function recordPongs(manager, session, samples) {
   for (const sample of samples) manager.recordPong(session, sample)
+}
+
+async function prepareMatch(manager, host, guest, hostSocket, guestSocket) {
+  const room = [...manager.rooms.values()][0]
+  const hostDraft = latest(hostSocket, 'room').room
+  const guestDraft = latest(guestSocket, 'room').room
+  assert.equal(hostDraft.phase, 'draft_select')
+  assert.equal(hostDraft.draft.poolCardKeys.length, 30)
+  assert.equal(guestDraft.draft.poolCardKeys.length, 30)
+  assert.equal(new Set([...hostDraft.draft.poolCardKeys, ...guestDraft.draft.poolCardKeys]).size, 60)
+
+  await manager.handle(host, JSON.stringify({ t: 'selectCards', cardKeys: hostDraft.draft.poolCardKeys }))
+  await manager.handle(guest, JSON.stringify({ t: 'selectCards', cardKeys: guestDraft.draft.poolCardKeys }))
+
+  const hostBan = latest(hostSocket, 'room').room
+  const guestBan = latest(guestSocket, 'room').room
+  assert.equal(hostBan.phase, 'draft_ban')
+  assert.equal(hostBan.draft.exchangeCardKeys.length, 30)
+  assert.equal(guestBan.draft.exchangeCardKeys.length, 30)
+  const hostOriginalPool = new Set(hostDraft.draft.poolCardKeys)
+  assert.equal(hostBan.draft.exchangeCardKeys.some((key) => hostOriginalPool.has(key)), false)
+
+  await manager.handle(host, JSON.stringify({ t: 'banCards', cardKeys: hostBan.draft.exchangeCardKeys.slice(0, 5) }))
+  await manager.handle(guest, JSON.stringify({ t: 'banCards', cardKeys: guestBan.draft.exchangeCardKeys.slice(0, 5) }))
+
+  const arranged = latest(hostSocket, 'room').room
+  assert.equal(arranged.phase, 'arrange')
+  assert.equal(arranged.totalRounds, 50)
+  assert.equal(arranged.players.A.handCardKeys.length, 25)
+  assert.equal(arranged.players.B.handCardKeys.length, 25)
+  assert.equal(new Set([...arranged.players.A.handCardKeys, ...arranged.players.B.handCardKeys]).size, 50)
+  return room
 }
 
 test('two players can create, join, ready, receive a round and claim a card', async () => {
@@ -55,12 +91,12 @@ test('two players can create, join, ready, receive a round and claim a card', as
       name: '测试房',
       packageId: 'deck.zip',
       deckName: '测试数据集',
-      cards: [card(1, '作品一'), card(2, '作品二')],
+      cards: candidateCards(),
     }))
     const roomMessage = latest(hostSocket, 'room')
     assert.ok(roomMessage)
     assert.equal(roomMessage.room.players.A.nickname, '房主')
-    assert.equal(roomMessage.room.cards[0].workName, '作品一')
+    assert.equal(roomMessage.room.cards[0].workName, '作品1')
     assert.equal('songs' in roomMessage.room.cards[0], false)
 
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: roomMessage.room.code, nickname: '对手' }))
@@ -69,6 +105,8 @@ test('two players can create, join, ready, receive a round and claim a card', as
     primeNetwork(manager, [host, guest])
     await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
     await new Promise((resolve) => setTimeout(resolve, 1_450))
     const round = latest(hostSocket, 'roundStart')
     assert.ok(round)
@@ -76,7 +114,6 @@ test('two players can create, join, ready, receive a round and claim a card', as
     assert.equal('cardKey' in round, false)
     assert.equal('song' in round, false)
 
-    const room = [...manager.rooms.values()][0]
     const currentKey = room.current.cardKey
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: currentKey, clientAt: 1 }))
     assert.equal(latest(hostSocket, 'roundResult'), undefined)
@@ -103,7 +140,7 @@ test('network measurements block unfair rooms before the match starts', async ()
       t: 'createRoom',
       nickname: 'host',
       packageId: 'deck.zip',
-      cards: [card(1, 'one'), card(2, 'two')],
+      cards: candidateCards(),
     }))
     const created = latest(hostSocket, 'room')
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
@@ -142,16 +179,16 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
       t: 'createRoom',
       nickname: 'host',
       packageId: 'deck.zip',
-      cards: [card(1, 'one'), card(2, 'two')],
+      cards: candidateCards(),
     }))
     const created = latest(hostSocket, 'room')
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
     primeNetwork(manager, [host, guest], 20, 20)
     await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
     await new Promise((resolve) => setTimeout(resolve, 1_450))
-
-    const room = [...manager.rooms.values()][0]
     const round = latest(hostSocket, 'roundStart')
     const currentKey = room.current.cardKey
     primeNetwork(manager, [host, guest], 120, 20)
@@ -161,6 +198,49 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
     assert.equal(latest(hostSocket, 'roundResult'), undefined)
     await new Promise((resolve) => setTimeout(resolve, 160))
     assert.equal(latest(hostSocket, 'roundResult').winner, 'A')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('an empty or wrong claim pauses the round until the opponent gives one card', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-transfer-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    await writeFile(path.join(temp, 'deck.zip'), Buffer.from('placeholder'))
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({
+      t: 'createRoom',
+      nickname: 'host',
+      packageId: 'deck.zip',
+      cards: candidateCards(),
+    }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    await new Promise((resolve) => setTimeout(resolve, 1_450))
+
+    const round = latest(hostSocket, 'roundStart')
+    const guestHandBefore = room.seats.B.handCardKeys.length
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: '', clientAt: 1 }))
+    assert.equal(room.pendingTransfer.from, 'A')
+    assert.equal(room.pendingTransfer.to, 'B')
+    assert.equal(latest(hostSocket, 'claimFeedback').penalty, true)
+
+    const gift = room.seats.B.handCardKeys[0]
+    await manager.handle(guest, JSON.stringify({ t: 'giveCard', cardKey: gift }))
+    assert.equal(room.pendingTransfer, null)
+    assert.equal(room.seats.A.handCardKeys.length, 26)
+    assert.equal(room.seats.B.handCardKeys.length, guestHandBefore - 1)
+    assert.equal(latest(hostSocket, 'cardTransfer').cardKey, gift)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -177,7 +257,7 @@ test('invalid rooms fail closed before a room is created', async () => {
       t: 'createRoom',
       nickname: '房主',
       packageId: '../secret.zip',
-      cards: [card(1, '作品一'), card(2, '作品二')],
+      cards: candidateCards(),
     }))
     const error = latest(socket, 'error')
     assert.equal(error.code, 'bad_room')

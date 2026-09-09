@@ -1,7 +1,8 @@
 import type { CardEntry } from '../types/models'
 
 export type OnlinePlayerId = 'A' | 'B'
-export type OnlineRoomPhase = 'lobby' | 'playing' | 'over'
+export type OnlineRoomPhase = 'lobby' | 'draft_select' | 'draft_ban' | 'arrange' | 'playing' | 'over'
+export type OnlineDraftPhase = 'waiting' | 'select' | 'ban' | 'arrange'
 
 export interface OnlineCardInput {
   key: string
@@ -31,6 +32,9 @@ export interface OnlinePlayerView {
   score: number
   correctClaims: number
   network: OnlineNetworkView
+  selectedCount: number
+  bannedCount: number
+  handCardKeys: string[]
 }
 
 export interface OnlineNetworkView {
@@ -50,6 +54,25 @@ export interface OnlineFairnessView {
   message: string
 }
 
+export interface OnlineDraftView {
+  phase: OnlineDraftPhase
+  poolCardKeys: string[]
+  selectedCardKeys: string[]
+  exchangeCardKeys: string[]
+  bannedCardKeys: string[]
+  selectionSize: number
+  banSize: number
+  opponentSelectedCount: number
+  opponentBannedCount: number
+  arrangeEndsAtServerTime: number | null
+}
+
+export interface OnlinePendingTransferView {
+  from: OnlinePlayerId
+  to: OnlinePlayerId
+  expiresAtServerTime: number
+}
+
 export interface OnlineRoomView {
   code: string
   name: string
@@ -63,6 +86,8 @@ export interface OnlineRoomView {
   roundNo: number
   totalRounds: number
   fairness: OnlineFairnessView
+  draft: OnlineDraftView
+  pendingTransfer: OnlinePendingTransferView | null
 }
 
 export interface OnlineRoomSummary {
@@ -86,6 +111,9 @@ export type OnlineClientMessage =
     }
   | { t: 'joinRoom'; code: string; nickname: string }
   | { t: 'ready'; ready: boolean }
+  | { t: 'selectCards'; cardKeys: string[] }
+  | { t: 'banCards'; cardKeys: string[] }
+  | { t: 'giveCard'; cardKey: string }
   | { t: 'claim'; roundNo: number; cardKey: string; clientAt: number }
   | { t: 'leaveRoom' }
   | { t: 'ping'; clientAt: number }
@@ -115,7 +143,15 @@ export type OnlineServerMessage =
   | { t: 'room'; room: OnlineRoomView }
   | { t: 'roomList'; rooms: OnlineRoomSummary[] }
   | OnlineRoundStart
-  | { t: 'claimFeedback'; playerId: OnlinePlayerId; cardKey: string; correct: boolean }
+  | {
+      t: 'claimFeedback'
+      playerId: OnlinePlayerId
+      cardKey: string
+      correct: boolean
+      penalty?: boolean
+      transferTo?: OnlinePlayerId
+    }
+  | { t: 'cardTransfer'; from: OnlinePlayerId; to: OnlinePlayerId; cardKey: string; automatic?: boolean }
   | OnlineRoundResult
   | {
       t: 'matchOver'

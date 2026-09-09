@@ -6,13 +6,20 @@ const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 const ROOM_CODE_LENGTH = 6
 const MAX_NICKNAME_LENGTH = 20
 const MAX_ROOM_NAME_LENGTH = 40
-const MAX_CARDS = 24
+const MIN_CANDIDATE_CARDS = 60
+const MAX_CARDS = 500
+const DRAFT_SELECTION_SIZE = 30
+const BAN_SIZE = 5
+const HAND_SIZE = DRAFT_SELECTION_SIZE - BAN_SIZE
+const MAX_HAND_SLOTS = 27
+const ARRANGE_WINDOW_MS = 3 * 60 * 1000
+const WRONG_TRANSFER_TIMEOUT_MS = 8_000
 const ROUND_WINDOW_MS = 10_000
 const ROUND_LEAD_MS = 750
 const REVEAL_MS = 2_400
 const ROOM_TTL_MS = 30 * 60 * 1000
 const RESUME_TTL_MS = 90 * 1000
-const MAX_MESSAGE_BYTES = 128 * 1024
+const MAX_MESSAGE_BYTES = 1024 * 1024
 const AUDIO_EXTENSIONS = new Set(['.aac', '.aif', '.aiff', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
 
 export const NETWORK_MIN_SAMPLES = 3
@@ -50,6 +57,19 @@ function networkMetrics(samples) {
 
 function emptyNetwork() {
   return { samples: [], rttMs: null, jitterMs: null }
+}
+
+function shuffle(values) {
+  const result = [...values]
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const swapIndex = crypto.randomInt(index + 1)
+    ;[result[index], result[swapIndex]] = [result[swapIndex], result[index]]
+  }
+  return result
+}
+
+function otherPlayer(playerId) {
+  return playerId === 'A' ? 'B' : 'A'
 }
 
 export class OnlineRoomManager {
@@ -112,6 +132,15 @@ export class OnlineRoomManager {
           break
         case 'ready':
           this.currentRoom(session)?.setReady(session, message.ready === true)
+          break
+        case 'selectCards':
+          this.currentRoom(session)?.selectCards(session, message)
+          break
+        case 'banCards':
+          this.currentRoom(session)?.banCards(session, message)
+          break
+        case 'giveCard':
+          this.currentRoom(session)?.giveCard(session, message)
           break
         case 'claim':
           this.currentRoom(session)?.claim(session, message)
@@ -264,6 +293,11 @@ export class OnlineRoomManager {
       ready: false,
       score: 0,
       correctClaims: 0,
+      poolCardKeys: [],
+      selectedCardKeys: [],
+      exchangeCardKeys: [],
+      bannedCardKeys: [],
+      handCardKeys: [],
       disconnectedAt: null,
     }
     session.room = room
@@ -366,6 +400,9 @@ class OnlineRoom {
     this.current = null
     this.roundTimer = null
     this.nextRoundTimer = null
+    this.arrangeTimer = null
+    this.arrangeEndsAt = null
+    this.pendingTransfer = null
     this.lastActivity = Date.now()
     this.disposed = false
   }
@@ -400,7 +437,7 @@ class OnlineRoom {
     this.seats[playerId].ready = ready
     this.touch()
     if (this.seats.A?.ready && this.seats.B?.ready) {
-      if (this.fairnessView().canStart) this.startMatch()
+      if (this.fairnessView().canStart && this.seats.A.socket && this.seats.B.socket) this.beginDraft()
       else {
         this.seats.A.ready = false
         this.seats.B.ready = false
@@ -411,20 +448,114 @@ class OnlineRoom {
     this.sendRoom()
   }
 
-  startMatch() {
+  beginDraft() {
     if (this.phase !== 'lobby' || !this.fairnessView().canStart) return
-    this.phase = 'playing'
-    this.roundNo = 0
-    this.remaining = new Set(this.cards.map((card) => card.key))
-    this.scores = EMPTY_SCORES()
+    const keys = shuffle(this.cards.map((card) => card.key))
+    const midpoint = Math.floor(keys.length / 2)
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
-      if (seat) {
-        seat.ready = false
-        seat.score = 0
-        seat.correctClaims = 0
-      }
+      if (!seat) continue
+      seat.ready = false
+      seat.score = 0
+      seat.correctClaims = 0
+      seat.poolCardKeys = playerId === 'A' ? keys.slice(0, midpoint) : keys.slice(midpoint)
+      seat.selectedCardKeys = []
+      seat.exchangeCardKeys = []
+      seat.bannedCardKeys = []
+      seat.handCardKeys = []
     }
+    this.phase = 'draft_select'
+    this.roundNo = 0
+    this.remaining = new Set()
+    this.scores = EMPTY_SCORES()
+    this.current = null
+    this.pendingTransfer = null
+    this.arrangeEndsAt = null
+    this.touch()
+    this.sendRoom()
+  }
+
+  selectCards(session, message) {
+    const playerId = this.playerIdFor(session)
+    if (!playerId || this.phase !== 'draft_select') return
+    const seat = this.seats[playerId]
+    const cardKeys = Array.isArray(message.cardKeys) ? [...new Set(message.cardKeys.filter((key) => typeof key === 'string'))] : []
+    const pool = new Set(seat.poolCardKeys)
+    if (cardKeys.length !== DRAFT_SELECTION_SIZE || cardKeys.some((key) => !pool.has(key))) {
+      this.manager.sendError(session, 'bad_selection', `请选择自己牌池中的 ${DRAFT_SELECTION_SIZE} 张牌`)
+      return
+    }
+    seat.selectedCardKeys = cardKeys
+    this.touch()
+    if (this.seats.A?.selectedCardKeys.length === DRAFT_SELECTION_SIZE && this.seats.B?.selectedCardKeys.length === DRAFT_SELECTION_SIZE) {
+      this.beginBan()
+    } else {
+      this.sendRoom()
+    }
+  }
+
+  beginBan() {
+    this.phase = 'draft_ban'
+    for (const playerId of ['A', 'B']) {
+      const seat = this.seats[playerId]
+      const opponent = this.seats[otherPlayer(playerId)]
+      if (!seat || !opponent) continue
+      seat.exchangeCardKeys = shuffle(opponent.selectedCardKeys)
+      seat.bannedCardKeys = []
+    }
+    this.touch()
+    this.sendRoom()
+  }
+
+  banCards(session, message) {
+    const playerId = this.playerIdFor(session)
+    if (!playerId || this.phase !== 'draft_ban') return
+    const seat = this.seats[playerId]
+    const cardKeys = Array.isArray(message.cardKeys) ? [...new Set(message.cardKeys.filter((key) => typeof key === 'string'))] : []
+    const exchange = new Set(seat.exchangeCardKeys)
+    if (cardKeys.length !== BAN_SIZE || cardKeys.some((key) => !exchange.has(key))) {
+      this.manager.sendError(session, 'bad_ban', `请选择收到的 ${BAN_SIZE} 张牌进行 BAN`)
+      return
+    }
+    seat.bannedCardKeys = cardKeys
+    this.touch()
+    if (this.seats.A?.bannedCardKeys.length === BAN_SIZE && this.seats.B?.bannedCardKeys.length === BAN_SIZE) {
+      this.finalizeHands()
+    } else {
+      this.sendRoom()
+    }
+  }
+
+  finalizeHands() {
+    for (const playerId of ['A', 'B']) {
+      const seat = this.seats[playerId]
+      if (!seat) return
+      const banned = new Set(seat.bannedCardKeys)
+      seat.handCardKeys = shuffle(seat.exchangeCardKeys.filter((key) => !banned.has(key)))
+      if (seat.handCardKeys.length !== HAND_SIZE) return
+    }
+    this.remaining = new Set([...this.seats.A.handCardKeys, ...this.seats.B.handCardKeys])
+    this.phase = 'arrange'
+    this.arrangeEndsAt = Date.now() + ARRANGE_WINDOW_MS
+    this.touch()
+    this.sendRoom()
+    this.scheduleArrangeStart(ARRANGE_WINDOW_MS)
+  }
+
+  scheduleArrangeStart(delay) {
+    if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
+    this.arrangeTimer = setTimeout(() => {
+      this.arrangeTimer = null
+      this.startPlaying()
+    }, delay)
+  }
+
+  startPlaying() {
+    if (this.disposed || this.phase !== 'arrange') return
+    if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
+    this.arrangeTimer = null
+    this.phase = 'playing'
+    this.arrangeEndsAt = null
     this.touch()
     this.sendRoom()
     this.scheduleNextRound(600)
@@ -464,6 +595,7 @@ class OnlineRoom {
       startAt,
       endsAt: startAt + ROUND_WINDOW_MS,
       claims: new Map(),
+      transferTimer: null,
       expiresAt: startAt + ROUND_WINDOW_MS + REVEAL_MS + 10_000,
     }
     this.touch()
@@ -484,20 +616,89 @@ class OnlineRoom {
     const playerId = this.playerIdFor(session)
     const current = this.current
     if (!playerId || this.phase !== 'playing' || !current || current.resolved) return
-    if (message.roundNo !== current.roundNo || current.claims.has(playerId)) return
+    if (message.roundNo !== current.roundNo || current.claims.has(playerId) || this.pendingTransfer) return
     const cardKey = typeof message.cardKey === 'string' ? message.cardKey : ''
-    if (!this.cardByKey.has(cardKey)) return
+    if (cardKey && (!this.cardByKey.has(cardKey) || !this.isCardOnBoard(cardKey))) return
     const receivedAt = Date.now()
     const rttMs = session.network?.rttMs
     const compensationMs = Number.isFinite(rttMs)
       ? Math.min(CLAIM_COMPENSATION_CAP_MS, Math.max(0, rttMs / 2))
       : 0
     const adjustedAt = receivedAt - compensationMs
-    const correct = adjustedAt >= current.startAt && adjustedAt <= current.endsAt && cardKey === current.cardKey
-    current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })
+    if (adjustedAt < current.startAt || adjustedAt > current.endsAt) return
+    const correct = cardKey === current.cardKey
     this.touch()
-    this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct })
-    if (correct) this.scheduleClaimSettlement()
+    if (correct) {
+      current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })
+      this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct })
+      this.scheduleClaimSettlement()
+      return
+    }
+    const to = otherPlayer(playerId)
+    this.pendingTransfer = {
+      from: playerId,
+      to,
+      expiresAtServerTime: Date.now() + WRONG_TRANSFER_TIMEOUT_MS,
+    }
+    this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct, penalty: true, transferTo: to })
+    this.scheduleTransferFallback(current)
+    this.sendRoom()
+  }
+
+  isCardOnBoard(cardKey) {
+    return ['A', 'B'].some((playerId) => this.seats[playerId]?.handCardKeys.includes(cardKey))
+  }
+
+  scheduleTransferFallback(current) {
+    if (current.transferTimer) clearTimeout(current.transferTimer)
+    current.transferTimer = setTimeout(() => {
+      current.transferTimer = null
+      if (this.current !== current || !this.pendingTransfer) return
+      const pending = this.pendingTransfer
+      const giver = this.seats[pending.to]
+      const recipient = this.seats[pending.from]
+      const cardKey = giver?.handCardKeys[Math.floor(Math.random() * (giver.handCardKeys.length || 1))]
+      if (cardKey && recipient && recipient.handCardKeys.length < MAX_HAND_SLOTS) {
+        this.transferCard(pending.to, cardKey, true)
+        return
+      }
+      this.pendingTransfer = null
+      this.touch()
+      this.sendRoom()
+    }, WRONG_TRANSFER_TIMEOUT_MS)
+  }
+
+  giveCard(session, message) {
+    const playerId = this.playerIdFor(session)
+    const pending = this.pendingTransfer
+    if (!playerId || this.phase !== 'playing' || !pending || pending.to !== playerId) return
+    const cardKey = typeof message.cardKey === 'string' ? message.cardKey : ''
+    this.transferCard(playerId, cardKey, false)
+  }
+
+  transferCard(giverId, cardKey, automatic) {
+    const pending = this.pendingTransfer
+    const giver = this.seats[giverId]
+    const recipient = pending ? this.seats[pending.from] : null
+    if (!pending || !giver || !recipient || pending.to !== giverId) return false
+    if (recipient.handCardKeys.length >= MAX_HAND_SLOTS) {
+      if (!automatic && giver.socket) this.manager.sendError(giver.socket, 'hand_full', '对方牌区已满，暂时无法转牌')
+      return false
+    }
+    const index = giver.handCardKeys.indexOf(cardKey)
+    if (index < 0) {
+      if (!automatic && giver.socket) this.manager.sendError(giver.socket, 'bad_transfer', '请选择自己牌区中的一张牌')
+      return false
+    }
+    giver.handCardKeys.splice(index, 1)
+    recipient.handCardKeys.push(cardKey)
+    this.pendingTransfer = null
+    if (this.current?.transferTimer) clearTimeout(this.current.transferTimer)
+    if (this.current) this.current.transferTimer = null
+    this.touch()
+    this.broadcast({ t: 'cardTransfer', from: giverId, to: pending.from, cardKey, automatic })
+    this.sendRoom()
+    return true
   }
 
   scheduleClaimSettlement() {
@@ -529,11 +730,19 @@ class OnlineRoom {
     if (!current || this.phase !== 'playing') return
     if (this.roundTimer) clearTimeout(this.roundTimer)
     if (current.settlementTimer) clearTimeout(current.settlementTimer)
+    if (current.transferTimer) clearTimeout(current.transferTimer)
     this.roundTimer = null
     current.settlementTimer = null
+    current.transferTimer = null
+    this.pendingTransfer = null
     current.resolved = true
     this.current = current
     this.remaining.delete(current.cardKey)
+    for (const playerId of ['A', 'B']) {
+      const seat = this.seats[playerId]
+      const index = seat?.handCardKeys.indexOf(current.cardKey) ?? -1
+      if (index >= 0) seat.handCardKeys.splice(index, 1)
+    }
     if (winner) {
       this.scores[winner] += 1
       const seat = this.seats[winner]
@@ -615,6 +824,7 @@ class OnlineRoom {
     this.phase = 'lobby'
     this.current = null
     this.roundNo = 0
+    this.arrangeEndsAt = null
     this.remaining = new Set(this.cards.map((card) => card.key))
     this.scores = EMPTY_SCORES()
     for (const playerId of ['A', 'B']) {
@@ -623,6 +833,11 @@ class OnlineRoom {
         seat.ready = false
         seat.score = 0
         seat.correctClaims = 0
+        seat.poolCardKeys = []
+        seat.selectedCardKeys = []
+        seat.exchangeCardKeys = []
+        seat.bannedCardKeys = []
+        seat.handCardKeys = []
       }
     }
   }
@@ -687,8 +902,10 @@ class OnlineRoom {
       cards: this.cards.map(({ key, number, imageName, workName }) => ({ key, number, imageName, workName })),
       remainingCardKeys: [...this.remaining],
       roundNo: this.roundNo,
-      totalRounds: this.cards.length,
+      totalRounds: HAND_SIZE * 2,
       fairness: this.fairnessView(),
+      draft: this.draftView(you),
+      pendingTransfer: this.pendingTransfer,
     }
   }
 
@@ -703,6 +920,34 @@ class OnlineRoom {
       score: seat.score,
       correctClaims: seat.correctClaims,
       network: this.networkView(playerId),
+      selectedCount: seat.selectedCardKeys.length,
+      bannedCount: seat.bannedCardKeys.length,
+      handCardKeys: [...seat.handCardKeys],
+    }
+  }
+
+  draftView(playerId) {
+    const seat = this.seats[playerId]
+    const opponent = this.seats[otherPlayer(playerId)]
+    const phase =
+      this.phase === 'draft_select'
+        ? 'select'
+        : this.phase === 'draft_ban'
+          ? 'ban'
+          : this.phase === 'arrange'
+            ? 'arrange'
+            : 'waiting'
+    return {
+      phase,
+      poolCardKeys: this.phase === 'draft_select' ? [...(seat?.poolCardKeys || [])] : [],
+      selectedCardKeys: [...(seat?.selectedCardKeys || [])],
+      exchangeCardKeys: this.phase === 'draft_ban' ? [...(seat?.exchangeCardKeys || [])] : [],
+      bannedCardKeys: [...(seat?.bannedCardKeys || [])],
+      selectionSize: DRAFT_SELECTION_SIZE,
+      banSize: BAN_SIZE,
+      opponentSelectedCount: opponent?.selectedCardKeys.length || 0,
+      opponentBannedCount: opponent?.bannedCardKeys.length || 0,
+      arrangeEndsAtServerTime: this.phase === 'arrange' ? this.arrangeEndsAt : null,
     }
   }
 
@@ -767,10 +1012,15 @@ class OnlineRoom {
   clearTimers() {
     if (this.roundTimer) clearTimeout(this.roundTimer)
     if (this.nextRoundTimer) clearTimeout(this.nextRoundTimer)
+    if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
     if (this.current?.settlementTimer) clearTimeout(this.current.settlementTimer)
+    if (this.current?.transferTimer) clearTimeout(this.current.transferTimer)
     this.roundTimer = null
     this.nextRoundTimer = null
+    this.arrangeTimer = null
     if (this.current) this.current.settlementTimer = null
+    if (this.current) this.current.transferTimer = null
+    this.pendingTransfer = null
   }
 
   touch() {
@@ -784,8 +1034,8 @@ class OnlineRoom {
 }
 
 function normalizeCards(input) {
-  if (!Array.isArray(input) || input.length < 2 || input.length > MAX_CARDS) {
-    return { ok: false, message: `请准备 ${2}-${MAX_CARDS} 张卡牌` }
+  if (!Array.isArray(input) || input.length < MIN_CANDIDATE_CARDS || input.length > MAX_CARDS || input.length % 2 !== 0) {
+    return { ok: false, message: `请准备 ${MIN_CANDIDATE_CARDS}-${MAX_CARDS} 张偶数张卡牌，才能随机分成两份` }
   }
   const keys = new Set()
   const cards = []

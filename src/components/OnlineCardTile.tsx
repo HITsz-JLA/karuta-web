@@ -9,6 +9,8 @@ interface Props {
   available: boolean
   picked?: boolean
   result?: boolean
+  pinned?: boolean
+  stateLabel?: string
   draggable?: boolean
   dragging?: boolean
   dropTarget?: boolean
@@ -30,6 +32,8 @@ export function OnlineCardTile({
   available,
   picked,
   result,
+  pinned = false,
+  stateLabel,
   draggable = false,
   dragging = false,
   dropTarget = false,
@@ -49,6 +53,7 @@ export function OnlineCardTile({
     available ? 'available' : draggable ? 'arrangeable' : 'claimed',
     picked ? 'picked' : '',
     result ? 'result' : '',
+    pinned ? 'pinned' : '',
     draggable ? 'draggable' : '',
     dragging ? 'dragging' : '',
     dropTarget ? 'drop-target' : '',
@@ -62,7 +67,7 @@ export function OnlineCardTile({
       type="button"
       draggable={draggable}
       disabled={!draggable && (!available || !onClick)}
-      onClick={available ? onClick : undefined}
+      onClick={available || draggable ? onClick : undefined}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
@@ -84,7 +89,7 @@ export function OnlineCardTile({
         )}
       </div>
       <span className="online-card-title">{meta.workName}</span>
-      {!available ? <span className="online-card-state">已收取</span> : null}
+      {pinned ? <span className="online-card-state">已固定</span> : stateLabel ? <span className="online-card-state">{stateLabel}</span> : !available ? <span className="online-card-state">已收取</span> : null}
     </button>
   )
 }
