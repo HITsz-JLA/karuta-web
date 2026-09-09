@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import type { CardEntry } from '../types/models'
 
@@ -5,17 +6,19 @@ interface CardTileProps {
   card: CardEntry
   selected?: boolean
   onClick?: () => void
+  onToggle?: (cardId: string) => void
   showSongCount?: boolean
 }
 
-export function CardTile({ card, selected, onClick, showSongCount = true }: CardTileProps) {
+export const CardTile = memo(function CardTile({ card, selected, onClick, onToggle, showSongCount = true }: CardTileProps) {
   const url = useObjectUrl(card.imageBlobKey)
+  const handleClick = onToggle ? () => onToggle(card.id) : onClick
 
   return (
     <button
       type="button"
       className={`card-tile${selected ? ' selected' : ''}`}
-      onClick={onClick}
+      onClick={handleClick}
     >
       <span className="num-badge">#{card.number}</span>
       {selected ? <span className="check-badge">✓</span> : null}
@@ -26,4 +29,4 @@ export function CardTile({ card, selected, onClick, showSongCount = true }: Card
       {showSongCount ? <div className="muted small">{card.songs.length} 首</div> : null}
     </button>
   )
-}
+})

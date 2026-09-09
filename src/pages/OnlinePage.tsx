@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import {
@@ -34,8 +34,10 @@ const ONLINE_CLOCK_TICK_MS = 250
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
 type BattleStyle = 'text' | 'card'
+type OnlineNetworkDelta = Extract<OnlineServerMessage, { t: 'network' }>
 
 const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
+const EMPTY_NETWORK_VIEW: OnlineNetworkView = { rttMs: null, jitterMs: null, samples: 0 }
 
 function readBattleStyle(): BattleStyle {
   try {
@@ -139,6 +141,17 @@ function sameFairnessView(left: OnlineFairnessView, right: OnlineFairnessView) {
   )
 }
 
+function networkDeltaFromRoom(room: OnlineRoomView): OnlineNetworkDelta {
+  return {
+    t: 'network',
+    players: {
+      A: room.players.A?.network || EMPTY_NETWORK_VIEW,
+      B: room.players.B?.network || EMPTY_NETWORK_VIEW,
+    },
+    fairness: room.fairness,
+  }
+}
+
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
   const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
@@ -165,6 +178,7 @@ export function OnlinePage() {
   const selectedPackage = onlinePackages.find(({ serverPackage }) => serverPackage.id === activePackageId) || null
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
   const [rooms, setRooms] = useState<OnlineRoomSummary[]>([])
+  const [networkDelta, setNetworkDelta] = useState<OnlineNetworkDelta | null>(null)
   const [nickname, setNickname] = useState(readNickname)
   const [roomName, setRoomName] = useState('校园歌牌房间')
   const [joinCode, setJoinCode] = useState('')
@@ -202,11 +216,15 @@ export function OnlinePage() {
   const [battleStyle, setBattleStyle] = useState<BattleStyle>(readBattleStyle)
   const draggingKeyRef = useRef<string | null>(null)
   const dragOverSlotRef = useRef<number | null>(null)
+  const pointerPositionRef = useRef<{ clientX: number; clientY: number } | null>(null)
+  const pointerFrameRef = useRef<number | null>(null)
   const announcedArrangeReadyRef = useRef<number | null>(null)
   const announcedRestReadyRef = useRef<number | null>(null)
   const publishedLayoutRoundRef = useRef<number | null>(null)
   const phaseRef = useRef<OnlineRoomView['phase'] | null>(null)
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
+  const ownHandKeys = room?.players[room.you]?.handCardKeys || EMPTY_CARD_KEYS
+  const ownHandSignature = ownHandKeys.join('\u0000')
   const roundRef = useRef<OnlineRoundStart | null>(round)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
 
@@ -316,6 +334,18 @@ export function OnlinePage() {
           phaseRef.current = incoming.room.phase
           roomRef.current = incoming.room
           setRoom(incoming.room)
+          const nextNetworkDelta = networkDeltaFromRoom(incoming.room)
+          setNetworkDelta((previous) => {
+            if (
+              previous &&
+              sameNetworkView(previous.players.A, nextNetworkDelta.players.A) &&
+              sameNetworkView(previous.players.B, nextNetworkDelta.players.B) &&
+              sameFairnessView(previous.fairness, nextNetworkDelta.fairness)
+            ) {
+              return previous
+            }
+            return nextNetworkDelta
+          })
           if (previousPhase === 'arrange' && incoming.room.phase !== 'arrange') {
             draggingKeyRef.current = null
             dragOverSlotRef.current = null
@@ -336,22 +366,16 @@ export function OnlinePage() {
           }
           break
         case 'network':
-          setRoom((previous) => {
-            if (!previous) return previous
-            const previousA = previous.players.A
-            const previousB = previous.players.B
-            const networkIsUnchanged =
-              Boolean(previousA && sameNetworkView(previousA.network, incoming.players.A)) &&
-              Boolean(previousB && sameNetworkView(previousB.network, incoming.players.B))
-            if (networkIsUnchanged && sameFairnessView(previous.fairness, incoming.fairness)) return previous
-            return {
-              ...previous,
-              fairness: incoming.fairness,
-              players: {
-                A: previousA ? { ...previousA, network: incoming.players.A } : null,
-                B: previousB ? { ...previousB, network: incoming.players.B } : null,
-              },
+          setNetworkDelta((previous) => {
+            if (
+              previous &&
+              sameNetworkView(previous.players.A, incoming.players.A) &&
+              sameNetworkView(previous.players.B, incoming.players.B) &&
+              sameFairnessView(previous.fairness, incoming.fairness)
+            ) {
+              return previous
             }
+            return incoming
           })
           break
         case 'peer':
@@ -592,7 +616,7 @@ export function OnlinePage() {
   }, [room?.restReadyStartAtServerTime, socket])
 
   useEffect(() => {
-    const keys = room?.players[room.you]?.handCardKeys || []
+    const keys = ownHandKeys
     setBoardSlots((previous) => {
       const available = new Set(keys)
       const next = Array<string | null>(MAX_HAND_SLOTS).fill(null)
@@ -613,14 +637,18 @@ export function OnlinePage() {
       if (next.length === previous.length && next.every((key, index) => key === previous[index])) return previous
       return next
     })
-    setPinnedKeys((previous) => new Set([...previous].filter((key) => keys.includes(key))))
+    setPinnedKeys((previous) => {
+      const next = new Set([...previous].filter((key) => keys.includes(key)))
+      if (next.size === previous.size && [...next].every((key) => previous.has(key))) return previous
+      return next
+    })
     if (!keys.length) {
       draggingKeyRef.current = null
       dragOverSlotRef.current = null
       setDraggingKey(null)
       setDragOverSlot(null)
     }
-  }, [room])
+  }, [ownHandKeys, ownHandSignature])
 
   const orderedRoomCards = useMemo(() => {
     return roomCards.slice(0, MAX_HAND_SLOTS)
@@ -639,7 +667,6 @@ export function OnlinePage() {
   }, [eligibleCards, keyword])
   const me = room ? room.players[room.you] : null
   const opponent = room ? room.players[otherPlayer(room.you)] : null
-  const ownHandKeys = me?.handCardKeys || EMPTY_CARD_KEYS
   const opponentHandKeys = opponent?.handCardKeys || EMPTY_CARD_KEYS
   const orderedHandCards = useMemo<Array<OnlineCardView | null>>(() => {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
@@ -730,6 +757,7 @@ export function OnlinePage() {
     phaseRef.current = null
     roomRef.current = null
     setRoom(null)
+    setNetworkDelta(null)
     setRound(null)
     setLastResult(null)
     setMatchOver(null)
@@ -761,17 +789,41 @@ export function OnlinePage() {
     [canArrange],
   )
 
+  const cancelPointerFrame = useCallback(() => {
+    if (pointerFrameRef.current !== null) window.cancelAnimationFrame(pointerFrameRef.current)
+    pointerFrameRef.current = null
+    pointerPositionRef.current = null
+  }, [])
+
+  const updateDragOverSlot = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!canArrange || !draggingKeyRef.current) return
+      const hovered = document.elementFromPoint(clientX, clientY)
+      const slotElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-slot-index]') : null
+      const slotIndex = Number.parseInt(slotElement?.dataset.onlineSlotIndex || '', 10)
+      if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= MAX_HAND_SLOTS || slotIndex === dragOverSlotRef.current) return
+      dragOverSlotRef.current = slotIndex
+      setDragOverSlot(slotIndex)
+    },
+    [canArrange],
+  )
+
   const clearDrag = useCallback(() => {
+    cancelPointerFrame()
     draggingKeyRef.current = null
     dragOverSlotRef.current = null
     setDraggingKey(null)
     setDragOverSlot(null)
-  }, [])
+  }, [cancelPointerFrame])
 
   useEffect(() => {
     if (canArrange || !draggingKeyRef.current) return
     clearDrag()
   }, [canArrange, clearDrag])
+
+  useEffect(() => {
+    return () => cancelPointerFrame()
+  }, [cancelPointerFrame])
 
   const handleDragStart = useCallback(
     (event: DragEvent<HTMLButtonElement>, cardKey: string) => {
@@ -829,25 +881,29 @@ export function OnlinePage() {
   const handlePointerMove = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
       if (!canArrange || !draggingKeyRef.current) return
-      const hovered = document.elementFromPoint(event.clientX, event.clientY)
-      const slotElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-slot-index]') : null
-      const slotIndex = Number.parseInt(slotElement?.dataset.onlineSlotIndex || '', 10)
-      if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= MAX_HAND_SLOTS || slotIndex === dragOverSlotRef.current) return
-      dragOverSlotRef.current = slotIndex
-      setDragOverSlot(slotIndex)
+      pointerPositionRef.current = { clientX: event.clientX, clientY: event.clientY }
+      if (pointerFrameRef.current !== null) return
+      pointerFrameRef.current = window.requestAnimationFrame(() => {
+        pointerFrameRef.current = null
+        const point = pointerPositionRef.current
+        pointerPositionRef.current = null
+        if (point) updateDragOverSlot(point.clientX, point.clientY)
+      })
     },
-    [canArrange],
+    [canArrange, updateDragOverSlot],
   )
 
   const handlePointerUp = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
       if (canArrange && draggingKeyRef.current && dragOverSlotRef.current !== null) {
+        cancelPointerFrame()
+        updateDragOverSlot(event.clientX, event.clientY)
         moveCardToSlot(draggingKeyRef.current, dragOverSlotRef.current)
       }
       clearDrag()
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     },
-    [canArrange, clearDrag, moveCardToSlot],
+    [canArrange, cancelPointerFrame, clearDrag, moveCardToSlot, updateDragOverSlot],
   )
 
   const handlePointerCancel = useCallback(
@@ -858,15 +914,15 @@ export function OnlinePage() {
     [clearDrag],
   )
 
-  function toggleSelected(card: ServerPackageCatalogCard) {
+  const toggleSelected = useCallback((cardKey: string) => {
     setSelectedIds((previous) => {
       const next = new Set(previous)
-      if (next.has(card.key)) next.delete(card.key)
-      else if (next.size < boardCount) next.add(card.key)
+      if (next.has(cardKey)) next.delete(cardKey)
+      else if (next.size < boardCount) next.add(cardKey)
       else setMessage(`本局最多选择 ${boardCount} 张卡牌`)
       return next
     })
-  }
+  }, [boardCount])
 
   function setBoardSize(value: number) {
     const input = Number.isFinite(value) ? Math.round(value) : DEFAULT_CANDIDATE_CARDS
@@ -1203,7 +1259,7 @@ export function OnlinePage() {
             <span className="versus-mark">VS</span>
             <PlayerBadge player={room.players.B} mine={room.you === 'B'} />
           </div>
-          <NetworkFairness room={room} />
+          <NetworkFairness you={room.you} network={networkDelta} />
           <div className="online-board compact">
             {orderedRoomCards.map((meta) => (
               <OnlineCardTile key={meta.key} meta={meta} available={false} />
@@ -1211,7 +1267,7 @@ export function OnlinePage() {
           </div>
           <div className="row spread">
              <span className="muted small">候选牌 {room.cards.length} 张 · 准备后进入选牌、互换和 BAN</span>
-            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !room.fairness.canStart} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
+            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !(networkDelta?.fairness.canStart ?? room.fairness.canStart)} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
               {ready ? '取消准备' : '准备开始'}
             </button>
           </div>
@@ -1493,7 +1549,7 @@ export function OnlinePage() {
                 {pinMode ? <span className="muted small">点击自己的牌固定/取消固定，再使用排序按钮。</span> : null}
               </section>
             ) : null}
-            <NetworkFairness room={room} compact />
+            <NetworkFairness you={room.you} network={networkDelta} compact />
             <div className="online-audio-control">
               <button className="btn btn-secondary online-audio-button" type="button" onClick={unlockAudio}>{audioButtonLabel}</button>
               {audioStatus === 'blocked' ? <span className="online-audio-status error" role="alert">浏览器拦截了自动播放，请点击按钮恢复音频。</span> : null}
@@ -1552,8 +1608,21 @@ interface VirtualServerCardGridProps {
   cards: ServerPackageCatalogCard[]
   packageId: string
   selected: Set<string>
-  onToggle: (card: ServerPackageCatalogCard) => void
+  onToggle: (cardKey: string) => void
 }
+
+const VirtualServerCard = memo(function VirtualServerCard({
+  meta,
+  selected,
+  onToggle,
+}: {
+  meta: OnlineCardView
+  selected: boolean
+  onToggle: (cardKey: string) => void
+}) {
+  const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
+  return <OnlineCardTile meta={meta} card={null} available picked={selected} onClick={handleClick} />
+})
 
 /**
  * Keeps the complete server catalog scrollable while mounting only the rows
@@ -1562,8 +1631,11 @@ interface VirtualServerCardGridProps {
  */
 function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: VirtualServerCardGridProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
+  const scrollTopRef = useRef(0)
+  const scrollFrameRef = useRef<number | null>(null)
   const [viewport, setViewport] = useState({ width: 0, height: 520 })
   const [scrollTop, setScrollTop] = useState(0)
+  const cardViews = useMemo(() => cards.map((card) => packageCardMeta(card, packageId)), [cards, packageId])
 
   useEffect(() => {
     const element = viewportRef.current
@@ -1576,6 +1648,21 @@ function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: Virtual
     return () => observer.disconnect()
   }, [])
 
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+    }
+  }, [])
+
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    scrollTopRef.current = event.currentTarget.scrollTop
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      setScrollTop(scrollTopRef.current)
+    })
+  }, [])
+
   const columns = viewport.width >= 720 ? 5 : viewport.width >= 480 ? 4 : viewport.width >= 320 ? 3 : 2
   const cardWidth = Math.max(92, (viewport.width - (columns - 1) * 8 - 6) / columns)
   const rowHeight = Math.ceil(cardWidth * 1.45 + 58)
@@ -1583,13 +1670,13 @@ function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: Virtual
   const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
   const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
   const startIndex = firstRow * columns
-  const renderedCards = cards.slice(startIndex, lastRow * columns)
+  const renderedCards = cardViews.slice(startIndex, lastRow * columns)
 
   return (
     <div
       className="online-select-viewport"
       ref={viewportRef}
-      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      onScroll={handleScroll}
       aria-label={`服务器牌组，共 ${cards.length} 张卡面`}
     >
       <div className="online-select-canvas" style={{ height: `${rowCount * rowHeight}px` }}>
@@ -1601,15 +1688,8 @@ function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: Virtual
             gridAutoRows: `${rowHeight}px`,
           }}
         >
-          {renderedCards.map((card) => (
-            <OnlineCardTile
-              key={card.key}
-              meta={packageCardMeta(card, packageId)}
-              card={null}
-              available
-              picked={selected.has(card.key)}
-              onClick={() => onToggle(card)}
-            />
+          {renderedCards.map((meta) => (
+            <VirtualServerCard key={meta.key} meta={meta} selected={selected.has(meta.key)} onToggle={onToggle} />
           ))}
         </div>
       </div>
@@ -1819,25 +1899,25 @@ function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A'];
   )
 }
 
-const NetworkFairness = memo(function NetworkFairness({ room, compact = false }: { room: OnlineRoomView; compact?: boolean }) {
-  const { fairness } = room
+const NetworkFairness = memo(function NetworkFairness({ you, network, compact = false }: { you: OnlineRoomView['you']; network: OnlineNetworkDelta | null; compact?: boolean }) {
+  if (!network) return null
+  const { fairness, players } = network
   if (compact) {
-    const own = room.players[room.you]
-    const opponent = room.players[otherPlayer(room.you)]
+    const own = players[you]
+    const opponent = players[otherPlayer(you)]
     return (
       <div className="network-fairness compact network-latency" role="status" aria-label="双方延迟">
         <strong>双方延迟</strong>
         <div className="network-metrics">
-          <span>我方 {formatNetworkMetric(own?.network.rttMs ?? null)}</span>
-          <span>对手 {formatNetworkMetric(opponent?.network.rttMs ?? null)}</span>
+          <span>我方 {formatNetworkMetric(own.rttMs)}</span>
+          <span>对手 {formatNetworkMetric(opponent.rttMs)}</span>
         </div>
       </div>
     )
   }
   const statusLabel = fairness.status === 'ready' ? '可开始' : fairness.status === 'unfair' ? '不适合公平对战' : '测量中'
-  const metric = (player: OnlineRoomView['players']['A']) => {
-    if (!player) return '等待玩家'
-    return `RTT ${formatNetworkMetric(player.network.rttMs)} · 抖动 ${formatNetworkMetric(player.network.jitterMs)} · ${player.network.samples} 次`
+  const metric = (player: OnlineNetworkView) => {
+    return `RTT ${formatNetworkMetric(player.rttMs)} · 抖动 ${formatNetworkMetric(player.jitterMs)} · ${player.samples} 次`
   }
 
   return (
@@ -1848,8 +1928,8 @@ const NetworkFairness = memo(function NetworkFairness({ room, compact = false }:
       </div>
       <p>{fairness.message}</p>
       <div className="network-metrics">
-        <span>A · {metric(room.players.A)}</span>
-        <span>B · {metric(room.players.B)}</span>
+        <span>A · {metric(players.A)}</span>
+        <span>B · {metric(players.B)}</span>
       </div>
     </div>
   )

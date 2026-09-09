@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { CardTile } from '../components/CardTile'
 import { useDeck, useSettings } from '../hooks/useDecks'
@@ -9,6 +9,75 @@ function parseNumberInput(raw: string): number[] {
     .split(/[\s,，、;；]+/)
     .map((part) => Number.parseInt(part.trim(), 10))
     .filter((value) => Number.isFinite(value) && value > 0)
+}
+
+interface LocalCardGridProps {
+  cards: CardEntry[]
+  selectedIds: Set<string>
+  onToggle: (cardId: string) => void
+}
+
+/** Keeps the complete local deck scrollable while mounting only nearby rows. */
+function LocalCardGrid({ cards, selectedIds, onToggle }: LocalCardGridProps) {
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const scrollTopRef = useRef(0)
+  const scrollFrameRef = useRef<number | null>(null)
+  const [viewport, setViewport] = useState({ width: 0, height: 520 })
+  const [scrollTop, setScrollTop] = useState(0)
+
+  useEffect(() => {
+    const element = viewportRef.current
+    if (!element) return
+    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight || 520 })
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+    }
+  }, [])
+
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    scrollTopRef.current = event.currentTarget.scrollTop
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      setScrollTop(scrollTopRef.current)
+    })
+  }, [])
+
+  const columns = Math.max(1, Math.floor((viewport.width + 12) / (viewport.width >= 700 ? 172 : 144)))
+  const cardWidth = Math.max(120, (viewport.width - (columns - 1) * 12 - 6) / columns)
+  const rowHeight = Math.ceil(cardWidth * 1.45 + 58)
+  const rowCount = Math.ceil(cards.length / columns)
+  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
+  const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
+  const startIndex = firstRow * columns
+  const renderedCards = cards.slice(startIndex, lastRow * columns)
+
+  return (
+    <div className="local-select-viewport" ref={viewportRef} onScroll={handleScroll} aria-label={`本地牌组，共 ${cards.length} 张卡面`}>
+      <div className="local-select-canvas" style={{ height: `${rowCount * rowHeight}px` }}>
+        <div
+          className="local-select-window"
+          style={{
+            top: `${firstRow * rowHeight}px`,
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+            gridAutoRows: `${rowHeight}px`,
+          }}
+        >
+          {renderedCards.map((card) => (
+            <CardTile key={card.id} card={card} selected={selectedIds.has(card.id)} onToggle={onToggle} />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function SelectPage() {
@@ -45,21 +114,21 @@ export function SelectPage() {
     })
   }, [deck, keyword])
 
-  function toggleCard(card: CardEntry) {
+  const toggleCard = useCallback((cardId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
-      if (next.has(card.id)) {
-        next.delete(card.id)
+      if (next.has(cardId)) {
+        next.delete(cardId)
       } else {
         if (next.size >= cardLimit) {
           setMessage(`最多只能选择 ${cardLimit} 张卡牌。`)
           return prev
         }
-        next.add(card.id)
+        next.add(cardId)
       }
       return next
     })
-  }
+  }, [cardLimit])
 
   function applyNumberEntry(mode: 'add' | 'replace') {
     if (!deck) return
@@ -212,15 +281,8 @@ export function SelectPage() {
         </label>
       </section>
 
-      <section className="card-grid" style={{ marginTop: 16 }}>
-        {visibleCards.map((card) => (
-          <CardTile
-            key={card.id}
-            card={card}
-            selected={selectedIds.has(card.id)}
-            onClick={() => toggleCard(card)}
-          />
-        ))}
+      <section style={{ marginTop: 16 }}>
+        <LocalCardGrid key={keyword} cards={visibleCards} selectedIds={selectedIds} onToggle={toggleCard} />
       </section>
 
       {!visibleCards.length ? <div className="empty-state">没有匹配的卡面</div> : null}

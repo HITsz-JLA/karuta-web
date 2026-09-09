@@ -214,6 +214,38 @@ test('network measurements block unfair rooms before the match starts', async ()
   }
 })
 
+test('resumed clients receive a full room snapshot after incremental updates', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    assert.ok(resumeToken)
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    manager.disconnect(host)
+    const resumedSocket = new FakeSocket()
+    const resumed = manager.connect(resumedSocket)
+    await manager.handle(resumed, JSON.stringify({ t: 'hello', resumeToken }))
+
+    const restored = latest(resumedSocket, 'room')
+    assert.ok(restored)
+    assert.equal(restored.room.code, created.room.code)
+    assert.equal(restored.room.you, 'A')
+    assert.equal(restored.room.cards.length, 60)
+    assert.equal(restored.room.players.B.nickname, 'guest')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('claim settlement lets a later high-RTT claim win after compensation', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-compensation-'))
   const manager = new OnlineRoomManager(temp)

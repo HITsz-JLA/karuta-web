@@ -235,7 +235,10 @@ export class OnlineRoomManager {
     seat.disconnectedAt = null
     record.expiresAt = Date.now() + RESUME_TTL_MS
     this.send(session, { t: 'welcome', resumed: true, resumeToken })
-    record.room.networkChanged()
+    // A resumed client may have missed every incremental network/peer update
+    // while it was disconnected. Restore the authoritative room snapshot
+    // before continuing with heartbeat-only updates.
+    record.room.networkChanged(true)
     record.room.broadcastPeer(record.playerId, true)
   }
 
@@ -1142,10 +1145,10 @@ class OnlineRoom {
     }
   }
 
-  networkChanged() {
+  networkChanged(forceRoom = false) {
     const fairness = this.fairnessView()
+    let changed = false
     if (this.phase === 'lobby' && !fairness.canStart) {
-      let changed = false
       for (const playerId of ['A', 'B']) {
         const seat = this.seats[playerId]
         if (seat?.ready) {
@@ -1153,11 +1156,11 @@ class OnlineRoom {
           changed = true
         }
       }
-      if (changed) {
-        this.touch()
-        this.sendRoom()
-        return
-      }
+    }
+    if (changed || forceRoom) {
+      if (changed) this.touch()
+      this.sendRoom()
+      return
     }
     this.sendNetwork(fairness)
   }
