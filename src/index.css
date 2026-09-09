@@ -2779,6 +2779,17 @@ body:has(.online-match-page) {
   contain: layout paint;
 }
 
+/* A live board keeps 66 card/image surfaces on screen.  Backdrop blur forces
+   the browser to re-rasterize the pixels behind those surfaces whenever the
+   countdown or a hover state changes, so use the already-layered opaque
+   gradients during a match. */
+.online-match-page .panel,
+.online-match-page .online-match-board,
+.online-match-page .online-sidebar-card {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 .online-match-page .online-match-board .hand-area {
   background: rgba(3, 8, 34, 0.42);
 }

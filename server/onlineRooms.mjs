@@ -431,6 +431,13 @@ class OnlineRoom {
     this.cards = options.cards
     this.catalogCards = options.catalogCards || options.cards
     this.cardByKey = new Map(this.cards.map((card) => [card.key, card]))
+    this.cardViews = this.cards.map(({ key, number, imageName, workName }) => ({
+      key,
+      number,
+      imageName,
+      workName,
+      imageUrl: `/api/packages/${encodeURIComponent(this.packageId)}/card-image?cardKey=${encodeURIComponent(key)}`,
+    }))
     this.seats = { A: null, B: null }
     this.phase = 'lobby'
     this.roundNo = 0
@@ -1136,7 +1143,8 @@ class OnlineRoom {
   }
 
   networkChanged() {
-    if (this.phase === 'lobby' && !this.fairnessView().canStart) {
+    const fairness = this.fairnessView()
+    if (this.phase === 'lobby' && !fairness.canStart) {
       let changed = false
       for (const playerId of ['A', 'B']) {
         const seat = this.seats[playerId]
@@ -1145,9 +1153,29 @@ class OnlineRoom {
           changed = true
         }
       }
-      if (changed) this.touch()
+      if (changed) {
+        this.touch()
+        this.sendRoom()
+        return
+      }
     }
-    this.sendRoom()
+    this.sendNetwork(fairness)
+  }
+
+  sendNetwork(fairness = this.fairnessView()) {
+    const message = {
+      t: 'network',
+      players: {
+        A: this.networkView('A'),
+        B: this.networkView('B'),
+      },
+      fairness,
+    }
+    for (const playerId of ['A', 'B']) {
+      const seat = this.seats[playerId]
+      if (!seat?.socket) continue
+      this.manager.send(seat.socket, message)
+    }
   }
 
   broadcastPeer(playerId, connected) {
@@ -1173,13 +1201,7 @@ class OnlineRoom {
         A: this.playerView('A', you),
         B: this.playerView('B', you),
       },
-      cards: this.cards.map(({ key, number, imageName, workName }) => ({
-        key,
-        number,
-        imageName,
-        workName,
-        imageUrl: `/api/packages/${encodeURIComponent(this.packageId)}/card-image?cardKey=${encodeURIComponent(key)}`,
-      })),
+      cards: this.cardViews,
       remainingCardKeys: [...this.remaining],
       restEndsAtServerTime: this.current?.restEndsAtServerTime || null,
       restAudioUrl: this.current?.restAudioUrl || null,

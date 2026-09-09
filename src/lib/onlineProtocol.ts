@@ -154,6 +154,11 @@ export type OnlineServerMessage =
       rounds: number
     }
   | { t: 'peer'; playerId: OnlinePlayerId; connected: boolean }
+  | {
+      t: 'network'
+      players: Record<OnlinePlayerId, OnlineNetworkView>
+      fairness: OnlineFairnessView
+    }
   | { t: 'pong'; clientAt: number; serverAt: number }
   | { t: 'error'; code: string; message: string }
 

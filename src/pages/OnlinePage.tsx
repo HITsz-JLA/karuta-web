@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import {
   type OnlineCardView,
+  type OnlineFairnessView,
+  type OnlineNetworkView,
   type OnlineRoomSummary,
   type OnlineRoundResult,
   type OnlineRoundStart,
@@ -28,6 +30,7 @@ const BAN_SIZE = 5
 const MAX_HAND_SLOTS = 33
 const REST_AUDIO_VOLUME = 0.28
 const EMPTY_CARD_KEYS: string[] = []
+const ONLINE_CLOCK_TICK_MS = 250
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
 type BattleStyle = 'text' | 'card'
@@ -121,6 +124,21 @@ function formatNetworkMetric(value: number | null) {
   return value === null ? '测量中' : `${value} ms`
 }
 
+function sameNetworkView(left: OnlineNetworkView, right: OnlineNetworkView) {
+  return left.rttMs === right.rttMs && left.jitterMs === right.jitterMs && left.samples === right.samples
+}
+
+function sameFairnessView(left: OnlineFairnessView, right: OnlineFairnessView) {
+  return (
+    left.status === right.status &&
+    left.canStart === right.canStart &&
+    left.rttGapMs === right.rttGapMs &&
+    left.jitterGapMs === right.jitterGapMs &&
+    left.maxJitterMs === right.maxJitterMs &&
+    left.message === right.message
+  )
+}
+
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
   const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
@@ -191,13 +209,11 @@ export function OnlinePage() {
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
   const roundRef = useRef<OnlineRoundStart | null>(round)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
-  const roundRemainingRef = useRef(roundRemaining)
 
   useEffect(() => {
     roundRef.current = round
     myClaimRef.current = myClaim
-    roundRemainingRef.current = roundRemaining
-  }, [myClaim, round, roundRemaining])
+  }, [myClaim, round])
 
   function playReadyCue() {
     try {
@@ -318,6 +334,38 @@ export function OnlinePage() {
           } else if (incoming.room.phase === 'draft_ban' && previousPhase !== 'draft_ban') {
             setDraftBans(new Set(incoming.room.draft.bannedCardKeys))
           }
+          break
+        case 'network':
+          setRoom((previous) => {
+            if (!previous) return previous
+            const previousA = previous.players.A
+            const previousB = previous.players.B
+            const networkIsUnchanged =
+              Boolean(previousA && sameNetworkView(previousA.network, incoming.players.A)) &&
+              Boolean(previousB && sameNetworkView(previousB.network, incoming.players.B))
+            if (networkIsUnchanged && sameFairnessView(previous.fairness, incoming.fairness)) return previous
+            return {
+              ...previous,
+              fairness: incoming.fairness,
+              players: {
+                A: previousA ? { ...previousA, network: incoming.players.A } : null,
+                B: previousB ? { ...previousB, network: incoming.players.B } : null,
+              },
+            }
+          })
+          break
+        case 'peer':
+          setRoom((previous) => {
+            const player = previous?.players[incoming.playerId]
+            if (!previous || !player || player.connected === incoming.connected) return previous
+            return {
+              ...previous,
+              players: {
+                ...previous.players,
+                [incoming.playerId]: { ...player, connected: incoming.connected },
+              },
+            }
+          })
           break
         case 'roundStart':
           setRound(incoming)
@@ -467,7 +515,7 @@ export function OnlinePage() {
       setRoundRemaining(Math.max(0, left))
     }
     updateRemaining()
-    const remainingTimer = window.setInterval(updateRemaining, 100)
+    const remainingTimer = window.setInterval(updateRemaining, ONLINE_CLOCK_TICK_MS)
     return () => {
       window.clearTimeout(playTimer)
       if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
@@ -512,7 +560,7 @@ export function OnlinePage() {
     const localLaunchAt = socket.toLocalTime(launchAt)
     const update = () => setArrangeReadyRemaining(Math.max(0, localLaunchAt - Date.now()))
     update()
-    const timer = window.setInterval(update, 100)
+    const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
 
     if (announcedArrangeReadyRef.current !== launchAt) {
       announcedArrangeReadyRef.current = launchAt
@@ -533,7 +581,7 @@ export function OnlinePage() {
     const localLaunchAt = socket.toLocalTime(launchAt)
     const update = () => setRestReadyRemaining(Math.max(0, localLaunchAt - Date.now()))
     update()
-    const timer = window.setInterval(update, 100)
+    const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
 
     if (announcedRestReadyRef.current !== launchAt) {
       announcedRestReadyRef.current = launchAt
@@ -892,7 +940,11 @@ export function OnlinePage() {
     const currentRoom = roomRef.current
     const currentRound = roundRef.current
     if (!currentRoom || !currentRound || myClaimRef.current || currentRoom.pendingTransfer || (cardKey && !currentRoom.remainingCardKeys.includes(cardKey))) return
-    if (!socket.send({ t: 'claim', roundNo: currentRound.roundNo, cardKey, clientAt: Math.max(0, currentRound.windowMs - roundRemainingRef.current) })) {
+    const clientAt = Math.min(
+      currentRound.windowMs,
+      Math.max(0, Date.now() - socket.toLocalTime(currentRound.startAtServerTime)),
+    )
+    if (!socket.send({ t: 'claim', roundNo: currentRound.roundNo, cardKey, clientAt })) {
       setMessage('连接已断开，本次抢牌没有送达')
       return
     }
@@ -1731,7 +1783,7 @@ const HandArea = memo(function HandArea({
   )
 })
 
-function TransferPanel({ room }: { room: OnlineRoomView }) {
+const TransferPanel = memo(function TransferPanel({ room }: { room: OnlineRoomView }) {
   const pending = room.pendingTransfer
   if (!pending) return null
   const isGiver = pending.to === room.you
@@ -1754,7 +1806,7 @@ function TransferPanel({ room }: { room: OnlineRoomView }) {
       </p>
     </section>
   )
-}
+})
 
 function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A']; mine: boolean }) {
   return (
@@ -1767,7 +1819,7 @@ function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A'];
   )
 }
 
-function NetworkFairness({ room, compact = false }: { room: OnlineRoomView; compact?: boolean }) {
+const NetworkFairness = memo(function NetworkFairness({ room, compact = false }: { room: OnlineRoomView; compact?: boolean }) {
   const { fairness } = room
   if (compact) {
     const own = room.players[room.you]
@@ -1801,7 +1853,7 @@ function NetworkFairness({ room, compact = false }: { room: OnlineRoomView; comp
       </div>
     </div>
   )
-}
+})
 
 function ScoreCard({
   player,
