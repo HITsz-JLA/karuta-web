@@ -1115,8 +1115,9 @@ export function OnlinePage() {
               <span className="muted small">2. 双方各从收到的 30 张中 BAN 5 张，剩余各 25 张</span>
               <span className="muted small">3. 开局排牌 3 分钟；3×11 是 33 个固定可放置槽位，只能调整自己的牌区</span>
               <span className="muted small">4. 空牌歌曲来自场外 20 首，单次出现后移出空牌池；没有对应卡面，点击任一卡面都会判错</span>
-               <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
-               <span className="muted small">6. 开局排牌和休息阶段都可提前准备；开局双方准备后 20 秒进入游戏，休息阶段双方准备后 5 秒进入下一回合</span>
+              <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
+              <span className="muted small">6. 开局排牌和休息阶段都可提前准备；开局双方准备后 20 秒进入游戏，休息阶段双方准备后 5 秒进入下一回合</span>
+              <span className="muted small">7. 无需换牌的收牌结算后，或完成换牌后某方手牌为 0，该方立即获胜并结束对局</span>
             </div>
             <Link className="btn btn-secondary" to="/admin">
               管理服务器牌组
