@@ -26,6 +26,7 @@ const DEFAULT_CANDIDATE_CARDS = 60
 const DRAFT_SELECTION_SIZE = 30
 const BAN_SIZE = 5
 const MAX_HAND_SLOTS = 33
+const REST_AUDIO_VOLUME = 0.28
 const EMPTY_CARD_KEYS: string[] = []
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
@@ -376,6 +377,7 @@ export function OnlinePage() {
 
     audio.preload = 'auto'
     audio.muted = false
+    audio.volume = round ? 1 : REST_AUDIO_VOLUME
     audio.src = source
     audio.load()
     const localStart = round ? socket.toLocalTime(round.startAtServerTime) : Date.now()
@@ -558,11 +560,12 @@ export function OnlinePage() {
       publishedLayoutRoundRef.current = null
       return
     }
-    if (!round || publishedLayoutRoundRef.current === round.roundNo) return
+    const layoutRevision = round?.roundNo ?? room?.roundNo ?? 0
+    if (publishedLayoutRoundRef.current === layoutRevision) return
     if (boardSlots.length !== MAX_HAND_SLOTS || boardSlots.filter(Boolean).length !== ownHandKeys.length) return
     if (!socket.send({ t: 'arrangeLayout', cardKeys: boardSlots })) return
-    publishedLayoutRoundRef.current = round.roundNo
-  }, [boardSlots, ownHandKeys, room?.phase, round, socket])
+    publishedLayoutRoundRef.current = layoutRevision
+  }, [boardSlots, ownHandKeys, room?.phase, room?.roundNo, round?.roundNo, socket])
 
   const createRoom = useCallback(async () => {
     if (!selectedPackage || !catalog) {
@@ -1187,6 +1190,7 @@ export function OnlinePage() {
   const stageLabel = isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
   const isGivingCard = Boolean(room.pendingTransfer?.to === room.you)
   const restReady = Boolean(me?.restReady)
+  const opponentRestReady = Boolean(opponent?.restReady)
   const statusText = isOpeningArrange
     ? `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
     : isResting
@@ -1300,12 +1304,20 @@ export function OnlinePage() {
                 <span>对手手牌 <strong>{opponentHandKeys.length}</strong> 张</span>
                 <span>双方牌区均为 3×11 固定槽位</span>
             </section>
-            {isResting && !room.pendingTransfer ? (
+            {isResting ? (
               <div className="online-ready-row">
-                <span className={restReady ? 'ready' : 'muted'}>{restReady ? '你已准备' : '双方可提前准备'}</span>
-                <button className={`btn btn-secondary online-ready-button${restReady ? ' active' : ''}`} type="button" onClick={toggleRestReady}>
-                  {restReady ? (restReadyRemaining > 0 ? `已准备 · ${restReadySeconds} 秒` : '取消准备') : '准备下一回合'}
-                </button>
+                <strong>提前准备</strong>
+                <div className="online-ready-status">
+                  <span className={restReady ? 'ready' : 'muted'}>{restReady ? '你已准备' : '你尚未准备'}</span>
+                  <span className={opponentRestReady ? 'ready' : 'muted'}>{opponentRestReady ? '对手已准备' : '等待对手准备'}</span>
+                </div>
+                {room.pendingTransfer ? (
+                  <span className="muted small">完成交牌后才能提前准备</span>
+                ) : (
+                  <button className={`btn btn-secondary online-ready-button${restReady ? ' active' : ''}`} type="button" onClick={toggleRestReady}>
+                    {restReady ? (restReadyRemaining > 0 ? `已准备 · ${restReadySeconds} 秒` : '取消准备') : '准备下一回合'}
+                  </button>
+                )}
               </div>
             ) : null}
             {restReadyRemaining > 0 ? (
@@ -1340,10 +1352,9 @@ export function OnlinePage() {
         </div>
       </section>
 
-      {lastResult || room.pendingTransfer ? (
-        <div className="online-modal-stack" aria-live="polite">
-          {lastResult ? (
-            <section className="panel cool online-result online-modal-card" role="status">
+      {lastResult ? (
+        <div className="online-result-overlay" aria-live="polite">
+            <section key={`result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
               <div className="row spread">
                 <strong>
                   {lastResult.reason === 'wrong'
@@ -1372,8 +1383,11 @@ export function OnlinePage() {
                 </div>
               )}
             </section>
-          ) : null}
-          {room.pendingTransfer ? <TransferPanel room={room} /> : null}
+        </div>
+      ) : null}
+      {room.pendingTransfer ? (
+        <div className="online-transfer-overlay" aria-live="polite">
+          <TransferPanel room={room} />
         </div>
       ) : null}
 

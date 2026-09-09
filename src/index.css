@@ -2418,40 +2418,55 @@ main.app-main:has(.online-page) {
   border-color: rgba(255, 225, 126, 0.72);
 }
 
-.online-modal-stack {
+.online-result-overlay {
   position: fixed;
+  inset: 0;
   z-index: 45;
-  top: 78px;
-  right: 18px;
   display: grid;
-  gap: 8px;
-  width: min(430px, calc(100vw - 36px));
+  place-items: center;
+  padding: 18px;
   pointer-events: none;
 }
 
-.online-modal-card,
-.online-modal-stack .transfer-panel {
+.online-result-overlay .online-modal-card {
+  width: min(480px, calc(100vw - 36px));
+  max-height: min(78vh, 560px);
+  overflow: auto;
   pointer-events: none;
   margin: 0;
   padding: 12px;
   border-color: rgba(255, 225, 126, 0.56) !important;
   background: linear-gradient(145deg, rgba(27, 20, 75, 0.96), rgba(49, 19, 74, 0.94)) !important;
   box-shadow: 0 16px 42px rgba(4, 6, 35, 0.42), 0 0 28px rgba(255, 100, 199, 0.14);
-  animation: online-modal-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: online-result-float 5.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
-.online-modal-card .online-result-body {
+.online-result-overlay .online-result-body {
   grid-template-columns: minmax(82px, 100px) 1fr;
   gap: 10px;
 }
 
-.online-modal-card .online-card-tile {
+.online-result-overlay .online-card-tile {
   pointer-events: none;
 }
 
-.online-modal-stack .transfer-panel {
+.online-transfer-overlay {
+  position: fixed;
+  z-index: 46;
+  top: 78px;
+  right: 18px;
+  width: min(430px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.online-transfer-overlay .transfer-panel {
+  pointer-events: none;
+  margin: 0;
+  padding: 12px;
   border-color: rgba(255, 225, 126, 0.82) !important;
   background: linear-gradient(120deg, rgba(255, 225, 126, 0.2), rgba(255, 100, 199, 0.16)) !important;
+  box-shadow: 0 16px 42px rgba(4, 6, 35, 0.42), 0 0 28px rgba(255, 100, 199, 0.14);
+  animation: online-modal-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @keyframes online-modal-in {
@@ -2466,12 +2481,38 @@ main.app-main:has(.online-page) {
   }
 }
 
+@keyframes online-result-float {
+  0% {
+    opacity: 0;
+    transform: translateY(24px) scale(0.9);
+  }
+
+  10%,
+  72% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.97);
+  }
+}
+
 @media (max-width: 640px) {
-  .online-modal-stack {
+  .online-transfer-overlay {
     top: 72px;
     right: 10px;
     left: 10px;
     width: auto;
+  }
+
+  .online-result-overlay {
+    padding: 10px;
+  }
+
+  .online-result-overlay .online-modal-card {
+    width: min(480px, calc(100vw - 20px));
   }
 }
 
@@ -2490,6 +2531,19 @@ main.app-main:has(.online-page) {
 .online-ready-row .ready {
   color: var(--online-yellow);
   font-weight: 800;
+}
+
+.online-ready-status {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.online-ready-status > span {
+  padding: 4px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(6, 11, 42, 0.24);
 }
 
 .online-ready-button {

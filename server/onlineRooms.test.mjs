@@ -115,6 +115,10 @@ test('two players can create, join, ready, receive a round and claim a card', as
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
+    const hostLayout = [...room.seats.A.handCardKeys, ...Array(8).fill(null)]
+    await manager.handle(host, JSON.stringify({ t: 'arrangeLayout', cardKeys: hostLayout }))
+    assert.equal(latest(hostSocket, 'room').room.players.A.layoutCardKeys, null)
+    assert.deepEqual(latest(guestSocket, 'room').room.players.A.layoutCardKeys, hostLayout)
     await new Promise((resolve) => setTimeout(resolve, 1_450))
     const round = latest(hostSocket, 'roundStart')
     assert.ok(round)
@@ -122,11 +126,6 @@ test('two players can create, join, ready, receive a round and claim a card', as
     assert.equal('cardKey' in round, false)
     assert.equal('song' in round, false)
     assert.equal('isEmpty' in round, false)
-
-    const hostLayout = [...room.seats.A.handCardKeys, ...Array(8).fill(null)]
-    await manager.handle(host, JSON.stringify({ t: 'arrangeLayout', cardKeys: hostLayout }))
-    assert.equal(latest(hostSocket, 'room').room.players.A.layoutCardKeys, null)
-    assert.deepEqual(latest(guestSocket, 'room').room.players.A.layoutCardKeys, hostLayout)
 
     if (room.current.isEmpty) {
       const cardKey = [...room.remaining][0]
