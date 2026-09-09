@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import { useDeck, useDeckList } from '../hooks/useDecks'
@@ -87,6 +87,12 @@ export function OnlinePage() {
   const syncingPackage = useRef<string | null>(null)
   const roomRef = useRef<OnlineRoomView | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [boardOrder, setBoardOrder] = useState<string[]>([])
+  const [draggingKey, setDraggingKey] = useState<string | null>(null)
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null)
+  const draggingKeyRef = useRef<string | null>(null)
+  const dragOverKeyRef = useRef<string | null>(null)
+  const roomCards = useMemo(() => room?.cards || [], [room?.cards])
 
   useEffect(() => {
     if (!selectedDeck) return
@@ -124,6 +130,10 @@ export function OnlinePage() {
           setMyClaim(null)
           setOpponentClaim(null)
           setRoundRemaining(incoming.windowMs)
+          draggingKeyRef.current = null
+          dragOverKeyRef.current = null
+          setDraggingKey(null)
+          setDragOverKey(null)
           break
         case 'claimFeedback':
           if (roomRef.current && incoming.playerId === roomRef.current.you) {
@@ -197,6 +207,21 @@ export function OnlinePage() {
     }
   }, [round, socket])
 
+  useEffect(() => {
+    const keys = roomCards.map((card) => card.key)
+    setBoardOrder((previous) => {
+      const next = [...previous.filter((key) => keys.includes(key)), ...keys.filter((key) => !previous.includes(key))]
+      if (next.length === previous.length && next.every((key, index) => key === previous[index])) return previous
+      return next
+    })
+    if (!keys.length) {
+      draggingKeyRef.current = null
+      dragOverKeyRef.current = null
+      setDraggingKey(null)
+      setDragOverKey(null)
+    }
+  }, [roomCards])
+
   const displayDeck = useMemo(() => {
     if (roomDeck?.sourcePackageId === room?.packageId) return roomDeck
     if (selectedDeck?.sourcePackageId === room?.packageId) return selectedDeck
@@ -208,6 +233,12 @@ export function OnlinePage() {
     for (const card of displayDeck?.cards || []) map.set(onlineCardKey(card), card)
     return map
   }, [displayDeck])
+
+  const orderedRoomCards = useMemo(() => {
+    const byKey = new Map(roomCards.map((card) => [card.key, card]))
+    const order = boardOrder.length ? boardOrder : roomCards.map((card) => card.key)
+    return order.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card))
+  }, [boardOrder, roomCards])
 
   useEffect(() => {
     if (!room?.packageId || displayDeck?.sourcePackageId === room.packageId || syncingPackage.current === room.packageId) {
@@ -272,10 +303,10 @@ export function OnlinePage() {
     )
   }, [eligibleCards, keyword])
 
-  const roomCards = room?.cards || []
   const me = room ? room.players[room.you] : null
   const opponent = room ? room.players[otherPlayer(room.you)] : null
   const hasLocalRoomDeck = Boolean(displayDeck?.sourcePackageId === room?.packageId && localCards.size)
+  const canArrange = Boolean(room?.phase === 'playing' && !round && !matchOver)
 
   const createRoom = useCallback(async () => {
     if (!selectedDeck) return setMessage('请先选择本地数据集')
@@ -343,6 +374,113 @@ export function OnlinePage() {
     void socket.connect().then(() => socket.send({ t: 'listRooms' }))
   }, [socket])
 
+  const moveCard = useCallback(
+    (sourceKey: string, targetKey: string) => {
+      if (!canArrange || !sourceKey || sourceKey === targetKey) return
+      setBoardOrder((previous) => {
+        const next = [...(previous.length ? previous : roomCards.map((card) => card.key))]
+        const sourceIndex = next.indexOf(sourceKey)
+        const targetIndex = next.indexOf(targetKey)
+        if (sourceIndex < 0 || targetIndex < 0) return previous
+        const [moved] = next.splice(sourceIndex, 1)
+        next.splice(targetIndex, 0, moved)
+        return next
+      })
+    },
+    [canArrange, roomCards],
+  )
+
+  const clearDrag = useCallback(() => {
+    draggingKeyRef.current = null
+    dragOverKeyRef.current = null
+    setDraggingKey(null)
+    setDragOverKey(null)
+  }, [])
+
+  const handleDragStart = useCallback(
+    (event: DragEvent<HTMLButtonElement>, cardKey: string) => {
+      if (!canArrange) {
+        event.preventDefault()
+        return
+      }
+      draggingKeyRef.current = cardKey
+      dragOverKeyRef.current = cardKey
+      setDraggingKey(cardKey)
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', cardKey)
+    },
+    [canArrange],
+  )
+
+  const handleDragOver = useCallback(
+    (event: DragEvent<HTMLButtonElement>, cardKey: string) => {
+      if (!canArrange || !draggingKeyRef.current) return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'move'
+      dragOverKeyRef.current = cardKey
+      setDragOverKey(cardKey)
+    },
+    [canArrange],
+  )
+
+  const handleDrop = useCallback(
+    (event: DragEvent<HTMLButtonElement>, targetKey: string) => {
+      if (!canArrange) return
+      event.preventDefault()
+      const sourceKey = event.dataTransfer.getData('text/plain') || draggingKeyRef.current || ''
+      moveCard(sourceKey, targetKey)
+      clearDrag()
+    },
+    [canArrange, clearDrag, moveCard],
+  )
+
+  const handleDragEnd = clearDrag
+
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLButtonElement>, cardKey: string) => {
+      if (!canArrange) return
+      event.preventDefault()
+      draggingKeyRef.current = cardKey
+      dragOverKeyRef.current = cardKey
+      setDraggingKey(cardKey)
+      setDragOverKey(cardKey)
+      event.currentTarget.setPointerCapture(event.pointerId)
+    },
+    [canArrange],
+  )
+
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (!canArrange || !draggingKeyRef.current) return
+      const hovered = document.elementFromPoint(event.clientX, event.clientY)
+      const cardElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-card-key]') : null
+      const cardKey = cardElement?.dataset.onlineCardKey
+      if (!cardKey || !roomCards.some((card) => card.key === cardKey) || cardKey === dragOverKeyRef.current) return
+      dragOverKeyRef.current = cardKey
+      setDragOverKey(cardKey)
+    },
+    [canArrange, roomCards],
+  )
+
+  const handlePointerUp = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (canArrange && draggingKeyRef.current && dragOverKeyRef.current) {
+        moveCard(draggingKeyRef.current, dragOverKeyRef.current)
+      }
+      clearDrag()
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    },
+    [canArrange, clearDrag, moveCard],
+  )
+
+  const handlePointerCancel = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      clearDrag()
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    },
+    [clearDrag],
+  )
+
   function toggleSelected(card: CardEntry) {
     setSelectedIds((previous) => {
       const next = new Set(previous)
@@ -387,7 +525,7 @@ export function OnlinePage() {
 
   if (!room) {
     return (
-      <>
+      <div className="online-page">
         <section className="hero">
           <div className="row spread">
             <div>
@@ -504,14 +642,14 @@ export function OnlinePage() {
         </div>
 
         {message ? <div className="toast">{message}</div> : null}
-      </>
+      </div>
     )
   }
 
   if (room.phase === 'lobby') {
     const ready = Boolean(me?.ready)
     return (
-      <>
+      <div className="online-page">
         <section className="hero">
           <div className="row spread">
             <div>
@@ -533,7 +671,7 @@ export function OnlinePage() {
             <div className="notice warn">{formatPackageProgress(packageProgress) || '正在准备本地卡面库…'}</div>
           ) : null}
           <div className="online-board compact">
-            {roomCards.map((meta) => (
+            {orderedRoomCards.map((meta) => (
               <OnlineCardTile key={meta.key} meta={meta} card={localCards.get(meta.key) || null} available={false} />
             ))}
           </div>
@@ -545,7 +683,7 @@ export function OnlinePage() {
           </div>
         </section>
         {message ? <div className="toast">{message}</div> : null}
-      </>
+      </div>
     )
   }
 
@@ -553,7 +691,7 @@ export function OnlinePage() {
     const scores = matchOver?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
     const winner = matchOver?.winner || (scores.A === scores.B ? null : scores.A > scores.B ? 'A' : 'B')
     return (
-      <>
+      <div className="online-page">
         <section className="hero">
           <h1>本局结束</h1>
           <p>{winner ? `${room.players[winner]?.nickname || winner} 获胜` : '双方平手'}</p>
@@ -568,7 +706,7 @@ export function OnlinePage() {
           <button className="btn btn-primary btn-lg" type="button" onClick={leaveRoom}>返回在线大厅</button>
         </section>
         {message ? <div className="toast">{message}</div> : null}
-      </>
+      </div>
     )
   }
 
@@ -577,7 +715,7 @@ export function OnlinePage() {
   const scores = lastResult?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
 
   return (
-    <>
+    <div className="online-page">
       <section className="hero">
         <div className="row spread">
           <div>
@@ -594,6 +732,12 @@ export function OnlinePage() {
         <ScoreCard player={room.players[otherPlayer(room.you)]} score={scores[otherPlayer(room.you)]} winner={false} />
       </div>
 
+      {canArrange ? (
+        <div className="arrange-hint" role="status">
+          <strong>休息阶段</strong>
+          <span>拖动卡面调整你这一侧的位置；布局只保存在本机。</span>
+        </div>
+      ) : null}
       <div className="status-banner">
         {myClaim?.correct === false ? '你抢错了，本回合等待结算' : myClaim?.correct ? '抢牌成功，等待结算' : opponentClaim ? '对手已经出手，等待结算' : round ? `听歌抢牌 · ${Math.ceil(roundRemaining / 1000)} 秒` : '准备下一回合…'}
       </div>
@@ -608,7 +752,7 @@ export function OnlinePage() {
         </div>
         <p className="muted small">点击你认为对应的卡面；卡面图片来自当前 HITsz-JLA 数据包。</p>
         <div className="online-board">
-          {room.cards.map((meta) => (
+          {orderedRoomCards.map((meta) => (
             <OnlineCardTile
               key={meta.key}
               meta={meta}
@@ -616,6 +760,17 @@ export function OnlinePage() {
               available={room.remainingCardKeys.includes(meta.key) && !myClaim && !lastResult}
               picked={myClaim?.cardKey === meta.key || opponentClaim?.cardKey === meta.key}
               result={lastResult?.cardKey === meta.key}
+              draggable={canArrange}
+              dragging={draggingKey === meta.key}
+              dropTarget={dragOverKey === meta.key && draggingKey !== meta.key}
+              onDragStart={(event) => handleDragStart(event, meta.key)}
+              onDragOver={(event) => handleDragOver(event, meta.key)}
+              onDrop={(event) => handleDrop(event, meta.key)}
+              onDragEnd={handleDragEnd}
+              onPointerDown={(event) => handlePointerDown(event, meta.key)}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
               onClick={() => claimCard(meta.key)}
             />
           ))}
@@ -641,7 +796,7 @@ export function OnlinePage() {
 
       {packageProgress ? <div className="notice">{formatPackageProgress(packageProgress)}</div> : null}
       {message ? <div className="toast">{message}</div> : null}
-    </>
+    </div>
   )
 }
 
