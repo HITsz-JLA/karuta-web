@@ -596,6 +596,349 @@ img {
   gap: 10px;
 }
 
+.online-lobby-grid {
+  display: grid;
+  gap: 16px;
+}
+
+@media (min-width: 900px) {
+  .online-lobby-grid {
+    grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+    align-items: start;
+  }
+}
+
+.connection-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--line);
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.connection-chip::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #a6acb7;
+}
+
+.connection-chip.online {
+  color: var(--accent);
+}
+
+.connection-chip.online::before {
+  background: var(--accent);
+}
+
+.notice {
+  padding: 11px 13px;
+  border: 1px solid rgba(47, 125, 74, 0.18);
+  border-radius: 12px;
+  background: rgba(47, 125, 74, 0.08);
+  color: #315d3d;
+  font-size: 0.88rem;
+}
+
+.notice.warn {
+  border-color: rgba(198, 91, 72, 0.22);
+  background: var(--danger-soft);
+  color: #8a3a2d;
+}
+
+.online-select-grid,
+.online-board {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (min-width: 560px) {
+  .online-select-grid,
+  .online-board {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 940px) {
+  .online-board {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+}
+
+.online-board.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-height: 320px;
+  overflow: auto;
+}
+
+.online-card-tile {
+  position: relative;
+  min-width: 0;
+  padding: 8px;
+  border: 2px solid rgba(36, 50, 74, 0.1);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  text-align: left;
+  transition: transform 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease;
+}
+
+.online-card-tile.available:hover,
+.online-card-tile.available:focus-visible {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 18px rgba(47, 125, 74, 0.15);
+  outline: none;
+}
+
+.online-card-tile.picked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 125, 74, 0.13);
+}
+
+.online-card-tile.claimed {
+  opacity: 0.45;
+  filter: saturate(0.65);
+}
+
+.online-card-tile.result {
+  opacity: 1;
+  border-color: var(--accent);
+  box-shadow: 0 10px 24px rgba(47, 125, 74, 0.2);
+}
+
+.online-card-tile:disabled {
+  cursor: default;
+}
+
+.online-card-number {
+  position: absolute;
+  z-index: 1;
+  top: 7px;
+  left: 7px;
+  min-width: 29px;
+  height: 27px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(29, 42, 68, 0.92);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.online-card-image {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #edf1f6, #f8efe5);
+}
+
+.online-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.online-card-missing {
+  padding: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  text-align: center;
+}
+
+.online-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 7px;
+  font-size: 0.86rem;
+  font-weight: 800;
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.online-card-state {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.room-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: white;
+  color: var(--ink);
+  text-align: left;
+}
+
+.room-list-item:hover,
+.room-list-item:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.room-list-item strong,
+.room-list-item .muted {
+  display: block;
+}
+
+.room-code {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+
+.room-code.large {
+  font-size: 1.05rem;
+}
+
+.online-rules {
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.versus-players,
+.versus-scorebar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.player-badge,
+.score-card {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: white;
+}
+
+.player-badge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.player-badge strong,
+.score-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presence-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #a6acb7;
+}
+
+.presence-dot.connected {
+  background: var(--accent);
+}
+
+.ready-label {
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.versus-mark {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.versus-scorebar {
+  margin-bottom: 16px;
+}
+
+.score-card {
+  display: grid;
+  gap: 4px;
+}
+
+.score-card.winner {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.score-value {
+  color: var(--accent);
+  font-size: 1.8rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.online-game-panel {
+  margin-top: 16px;
+}
+
+.online-result {
+  margin-top: 16px;
+}
+
+.online-result-body {
+  display: grid;
+  grid-template-columns: minmax(110px, 170px) 1fr;
+  gap: 16px;
+  align-items: center;
+}
+
+@media (max-width: 480px) {
+  .versus-players,
+  .versus-scorebar {
+    gap: 6px;
+  }
+
+  .player-badge,
+  .score-card {
+    padding: 10px;
+  }
+
+  .online-result-body {
+    grid-template-columns: 110px 1fr;
+  }
+}
+
 @media (min-width: 640px) {
   .number-entry {
     grid-template-columns: 1fr auto;

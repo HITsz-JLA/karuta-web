@@ -88,9 +88,11 @@ export function HomePage() {
         (progress) => setImportProgress(progress),
         serverPackage.mode,
       )
+      const synced = { ...imported, sourcePackageId: serverPackage.id }
+      await saveDeck(synced)
       await refresh()
-      setSelectedId(imported.id)
-      setMessage(`已导入：${imported.name}`)
+      setSelectedId(synced.id)
+      setMessage(`已导入：${synced.name}`)
     } catch (error) {
       setMessage(readableImportError(error))
     } finally {
@@ -140,8 +142,8 @@ export function HomePage() {
   return (
     <>
       <section className="hero">
-        <h1>点歌对战</h1>
-        <p>歌牌数据包存放在服务器本地，普通用户只能读取；管理员登录后可上传 ZIP。</p>
+        <h1>歌牌对战</h1>
+        <p>复用服务器本地歌牌数据包；可在本机进行歌牌练习，也可创建在线 1v1 房间。</p>
       </section>
 
       <div className="grid-home">
@@ -166,6 +168,9 @@ export function HomePage() {
                 编辑本地副本
               </Link>
             ) : null}
+            <Link className="btn btn-primary" to="/online">
+              在线 1v1 歌牌对战
+            </Link>
           </div>
 
           <section className="panel stack" style={{ boxShadow: 'none' }}>
@@ -287,7 +292,7 @@ export function HomePage() {
               </div>
             </div>
             <button className="btn btn-primary btn-lg btn-block" type="button" onClick={startGame}>
-              开始
+              开始本地歌牌对战
             </button>
           </div>
         </section>

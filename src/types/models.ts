@@ -19,6 +19,8 @@ export interface SongEntry {
   fileName: string
   displayName: string
   blobKey: string
+  /** Original path inside a server data package, used by online audio serving. */
+  sourcePath?: string
   /** Optional full-length source used by rest music in complete packages. */
   fullBlobKey?: string
 }
@@ -29,6 +31,8 @@ export interface CardEntry {
   number: number
   imageName: string
   imageBlobKey: string | null
+  /** Original cover path inside a server data package, used to match cards across devices. */
+  imagePath?: string
   workName: string
   songs: SongEntry[]
   emptyCard?: boolean
@@ -40,6 +44,8 @@ export interface DeckMeta {
   updatedAt: number
   cardCount: number
   songCount: number
+  /** Server package filename this local deck was imported from, when known. */
+  sourcePackageId?: string
 }
 
 export interface DeckRecord {
@@ -47,6 +53,8 @@ export interface DeckRecord {
   name: string
   updatedAt: number
   cards: CardEntry[]
+  /** Server package filename this local deck was imported from, when known. */
+  sourcePackageId?: string
 }
 
 export interface GameSettings {

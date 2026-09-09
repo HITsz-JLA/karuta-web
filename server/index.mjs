@@ -2,8 +2,12 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promises as fs } from 'node:fs'
+import { createServer } from 'node:http'
 import express from 'express'
 import multer from 'multer'
+import { WebSocketServer } from 'ws'
+import { OnlineRoomManager } from './onlineRooms.mjs'
+import { readZipAsset } from './zipAsset.mjs'
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url))
 const projectDir = path.resolve(serverDir, '..')
@@ -36,6 +40,9 @@ const metadataDir = path.join(dataDir, '.metadata')
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '0.0.0.0'
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
+const onlineRooms = new OnlineRoomManager(dataDir, {
+  maxRooms: Number(process.env.ONLINE_MAX_ROOMS || 100),
+})
 
 async function getAdminPassword() {
   const configured = process.env.ADMIN_PASSWORD?.trim()
@@ -321,6 +328,27 @@ app.post('/api/packages', requireAdmin, upload.single('file'), async (request, r
   }
 })
 
+app.get('/api/online/room/:code/audio/:token', async (request, response, next) => {
+  try {
+    const asset = await onlineRooms.getAudio(request.params.code, request.params.token)
+    if (!asset) {
+      response.status(404).json({ message: '音频凭证无效或已过期' })
+      return
+    }
+    const media = await readZipAsset(asset.packagePath, asset.sourcePath, asset.fileName)
+    response.setHeader('Content-Type', audioMime(media.name || asset.fileName))
+    response.setHeader('Cache-Control', 'private, no-store')
+    response.setHeader('Content-Length', String(media.data.byteLength))
+    response.send(media.data)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      response.status(404).json({ message: '音频资源不存在' })
+      return
+    }
+    next(error)
+  }
+})
+
 app.use('/api', (_request, response) => {
   response.status(404).json({ message: 'API 不存在' })
 })
@@ -352,9 +380,61 @@ app.use((error, _request, response, _next) => {
   response.status(500).json({ message: '服务器处理失败' })
 })
 
-app.listen(port, host, () => {
+function audioMime(fileName) {
+  const ext = path.extname(fileName || '').toLowerCase()
+  if (ext === '.m4a' || ext === '.mp4') return 'audio/mp4'
+  if (ext === '.ogg' || ext === '.oga') return 'audio/ogg'
+  if (ext === '.wav') return 'audio/wav'
+  if (ext === '.flac') return 'audio/flac'
+  return 'audio/mpeg'
+}
+
+const httpServer = createServer(app)
+const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
+
+httpServer.on('upgrade', (request, socket, head) => {
+  let url
+  try {
+    url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
+  } catch {
+    socket.destroy()
+    return
+  }
+  if (url.pathname !== '/ws') {
+    socket.destroy()
+    return
+  }
+  websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+    websocketServer.emit('connection', websocket, request)
+  })
+})
+
+websocketServer.on('connection', (socket, request) => {
+  const session = onlineRooms.connect(socket, request.socket.remoteAddress || 'unknown')
+  let disconnected = false
+  const disconnect = () => {
+    if (disconnected) return
+    disconnected = true
+    onlineRooms.disconnect(session)
+  }
+  socket.on('message', (message) => {
+    void onlineRooms.handle(session, message)
+  })
+  socket.on('close', disconnect)
+  socket.on('error', disconnect)
+})
+
+httpServer.listen(port, host, () => {
   console.log(`Karuta Web server listening on http://${host}:${port}`)
   if (!process.env.ADMIN_PASSWORD) {
     console.log('管理员密码已保存到受保护文件，不会写入服务日志')
   }
 })
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    onlineRooms.dispose()
+    websocketServer.close()
+    httpServer.close(() => process.exit(0))
+  })
+}
