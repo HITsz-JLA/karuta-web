@@ -6,13 +6,30 @@ interface CachedObjectUrl {
   refs: number
 }
 
+const IDLE_OBJECT_URL_LIMIT = 96
 const objectUrlCache = new Map<string, CachedObjectUrl>()
 const pendingObjectUrls = new Map<string, Promise<string | null>>()
+
+function touchObjectUrl(blobKey: string, cached: CachedObjectUrl) {
+  objectUrlCache.delete(blobKey)
+  objectUrlCache.set(blobKey, cached)
+}
+
+function trimIdleObjectUrls() {
+  if (objectUrlCache.size <= IDLE_OBJECT_URL_LIMIT) return
+  for (const [blobKey, cached] of objectUrlCache) {
+    if (objectUrlCache.size <= IDLE_OBJECT_URL_LIMIT) break
+    if (cached.refs > 0) continue
+    objectUrlCache.delete(blobKey)
+    URL.revokeObjectURL(cached.url)
+  }
+}
 
 async function acquireObjectUrl(blobKey: string): Promise<string | null> {
   const cached = objectUrlCache.get(blobKey)
   if (cached) {
     cached.refs += 1
+    touchObjectUrl(blobKey, cached)
     return cached.url
   }
 
@@ -30,11 +47,13 @@ async function acquireObjectUrl(blobKey: string): Promise<string | null> {
   const raced = objectUrlCache.get(blobKey)
   if (raced) {
     raced.refs += 1
+    touchObjectUrl(blobKey, raced)
     if (raced.url !== url) URL.revokeObjectURL(url)
     return raced.url
   }
 
   objectUrlCache.set(blobKey, { url, refs: 1 })
+  trimIdleObjectUrls()
   return url
 }
 
@@ -43,8 +62,8 @@ function releaseObjectUrl(blobKey: string, url: string) {
   if (!cached || cached.url !== url) return
   cached.refs -= 1
   if (cached.refs > 0) return
-  objectUrlCache.delete(blobKey)
-  URL.revokeObjectURL(url)
+  touchObjectUrl(blobKey, cached)
+  trimIdleObjectUrls()
 }
 
 export function useObjectUrl(blobKey: string | null | undefined) {

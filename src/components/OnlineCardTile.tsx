@@ -31,6 +31,18 @@ const CARD_IMAGE_CACHE_NAME = 'karuta-card-images-v1'
 const CARD_IMAGE_MEMORY_LIMIT = 96
 const cachedImageUrls = new Map<string, string>()
 const pendingImageLoads = new Map<string, Promise<string>>()
+let imageCachePromise: Promise<Cache> | null = null
+
+async function openImageCache() {
+  if (typeof caches === 'undefined') return null
+  if (!imageCachePromise) {
+    imageCachePromise = caches.open(CARD_IMAGE_CACHE_NAME).catch((error: unknown) => {
+      imageCachePromise = null
+      throw error
+    })
+  }
+  return imageCachePromise
+}
 
 function rememberImageUrl(imageUrl: string, objectUrl: string) {
   const previous = cachedImageUrls.get(imageUrl)
@@ -57,8 +69,8 @@ async function loadCachedImage(imageUrl: string) {
 
   const load = (async () => {
     try {
-      if (typeof caches === 'undefined') return imageUrl
-      const cache = await caches.open(CARD_IMAGE_CACHE_NAME)
+      const cache = await openImageCache()
+      if (!cache) return imageUrl
       let response = await cache.match(imageUrl)
       if (!response) {
         response = await fetch(imageUrl, { cache: 'force-cache' })
