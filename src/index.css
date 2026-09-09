@@ -792,6 +792,67 @@ img {
   color: #fff;
 }
 
+.network-fairness {
+  display: grid;
+  gap: 8px;
+  padding: 13px 15px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.network-fairness.ready {
+  border-color: rgba(127, 245, 207, 0.4);
+  background: rgba(127, 245, 207, 0.08);
+}
+
+.network-fairness.measuring {
+  border-color: rgba(100, 217, 255, 0.42);
+  background: rgba(100, 217, 255, 0.09);
+}
+
+.network-fairness.unfair {
+  border-color: rgba(255, 126, 169, 0.7);
+  background: rgba(255, 87, 137, 0.14);
+  box-shadow: 0 0 18px rgba(255, 87, 137, 0.12);
+}
+
+.network-fairness.compact {
+  margin-bottom: 12px;
+  padding: 10px 13px;
+}
+
+.network-fairness p {
+  margin: 0;
+  color: #eeeaff;
+  font-size: 0.88rem;
+}
+
+.network-fairness > .row > strong {
+  letter-spacing: 0.08em;
+}
+
+.network-fairness.ready > .row > span {
+  color: #7ff5cf;
+}
+
+.network-fairness.measuring > .row > span {
+  color: var(--online-blue);
+}
+
+.network-fairness.unfair > .row > span {
+  color: #ff9fbc;
+}
+
+.network-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 18px;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.78rem;
+}
+
 .arrange-hint {
   display: flex;
   flex-wrap: wrap;

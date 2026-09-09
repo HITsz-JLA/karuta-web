@@ -39,6 +39,7 @@ const tempDir = path.join(dataDir, '.tmp')
 const metadataDir = path.join(dataDir, '.metadata')
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '0.0.0.0'
+const websocketHeartbeatMs = 1_000
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
 const onlineRooms = new OnlineRoomManager(dataDir, {
   maxRooms: Number(process.env.ONLINE_MAX_ROOMS || 100),
@@ -392,6 +393,17 @@ function audioMime(fileName) {
 const httpServer = createServer(app)
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 })
 
+function pingWebsocket(socket) {
+  if (socket.readyState !== 1) return
+  socket.isAlive = false
+  socket.karutaPingAt = Date.now()
+  try {
+    socket.ping()
+  } catch {
+    socket.terminate()
+  }
+}
+
 httpServer.on('upgrade', (request, socket, head) => {
   let url
   try {
@@ -412,6 +424,9 @@ httpServer.on('upgrade', (request, socket, head) => {
 websocketServer.on('connection', (socket, request) => {
   const session = onlineRooms.connect(socket, request.socket.remoteAddress || 'unknown')
   let disconnected = false
+  socket.isAlive = true
+  socket.karutaPingAt = 0
+  socket.karutaMissedPongs = 0
   const disconnect = () => {
     if (disconnected) return
     disconnected = true
@@ -420,9 +435,32 @@ websocketServer.on('connection', (socket, request) => {
   socket.on('message', (message) => {
     void onlineRooms.handle(session, message)
   })
+  socket.on('pong', () => {
+    socket.isAlive = true
+    socket.karutaMissedPongs = 0
+    const sentAt = socket.karutaPingAt
+    socket.karutaPingAt = 0
+    if (sentAt) onlineRooms.recordPong(session, Date.now() - sentAt)
+  })
   socket.on('close', disconnect)
   socket.on('error', disconnect)
+  pingWebsocket(socket)
 })
+
+const websocketHeartbeatTimer = setInterval(() => {
+  for (const socket of websocketServer.clients) {
+    if (socket.isAlive === false) {
+      socket.karutaMissedPongs = (socket.karutaMissedPongs || 0) + 1
+      if (socket.karutaMissedPongs >= 3) {
+        socket.terminate()
+      }
+      continue
+    }
+    socket.karutaMissedPongs = 0
+    pingWebsocket(socket)
+  }
+}, websocketHeartbeatMs)
+websocketHeartbeatTimer.unref?.()
 
 httpServer.listen(port, host, () => {
   console.log(`Karuta Web server listening on http://${host}:${port}`)
@@ -434,6 +472,7 @@ httpServer.listen(port, host, () => {
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, () => {
     onlineRooms.dispose()
+    clearInterval(websocketHeartbeatTimer)
     websocketServer.close()
     httpServer.close(() => process.exit(0))
   })

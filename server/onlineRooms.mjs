@@ -15,7 +15,42 @@ const RESUME_TTL_MS = 90 * 1000
 const MAX_MESSAGE_BYTES = 128 * 1024
 const AUDIO_EXTENSIONS = new Set(['.aac', '.aif', '.aiff', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
 
+export const NETWORK_MIN_SAMPLES = 3
+export const NETWORK_MAX_RTT_GAP_MS = 80
+export const NETWORK_MAX_JITTER_MS = 60
+export const NETWORK_MAX_JITTER_GAP_MS = 40
+export const CLAIM_COMPENSATION_CAP_MS = 60
+export const CLAIM_SETTLE_DELAY_MS = 125
+
+const NETWORK_MAX_SAMPLES = 12
+const NETWORK_MAX_RTT_MS = 5_000
+
 const EMPTY_SCORES = () => ({ A: 0, B: 0 })
+
+function roundMetric(value) {
+  return Math.round(value)
+}
+
+function median(values) {
+  if (!values.length) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)]
+}
+
+function networkMetrics(samples) {
+  const rttMs = median(samples)
+  const jitterSamples = samples.slice(1).map((sample, index) => Math.abs(sample - samples[index]))
+  const jitterMs = median(jitterSamples)
+  return {
+    rttMs: rttMs === null ? null : roundMetric(rttMs),
+    jitterMs: jitterMs === null ? null : roundMetric(jitterMs),
+    samples: samples.length,
+  }
+}
+
+function emptyNetwork() {
+  return { samples: [], rttMs: null, jitterMs: null }
+}
 
 export class OnlineRoomManager {
   constructor(dataDir, options = {}) {
@@ -29,10 +64,21 @@ export class OnlineRoomManager {
   }
 
   connect(socket, ip = 'unknown') {
-    const session = { socket, ip, room: null, playerId: null, resumeToken: null }
+    const session = { socket, ip, room: null, playerId: null, resumeToken: null, network: emptyNetwork() }
     this.sessions.set(socket, session)
     this.send(session, { t: 'welcome', resumed: false })
     return session
+  }
+
+  recordPong(session, rttMs) {
+    if (!session || !this.sessions.has(session.socket)) return
+    if (!Number.isFinite(rttMs) || rttMs < 0 || rttMs > NETWORK_MAX_RTT_MS) return
+    session.network.samples.push(roundMetric(rttMs))
+    if (session.network.samples.length > NETWORK_MAX_SAMPLES) session.network.samples.shift()
+    const metrics = networkMetrics(session.network.samples)
+    session.network.rttMs = metrics.rttMs
+    session.network.jitterMs = metrics.jitterMs
+    if (session.room) session.room.networkChanged()
   }
 
   async handle(session, rawMessage) {
@@ -134,7 +180,7 @@ export class OnlineRoomManager {
     seat.disconnectedAt = null
     record.expiresAt = Date.now() + RESUME_TTL_MS
     this.send(session, { t: 'welcome', resumed: true, resumeToken })
-    record.room.sendRoom()
+    record.room.networkChanged()
     record.room.broadcastPeer(record.playerId, true)
   }
 
@@ -341,13 +387,32 @@ class OnlineRoom {
   setReady(session, ready) {
     const playerId = this.playerIdFor(session)
     if (!playerId || this.phase !== 'lobby') return
+    const fairness = this.fairnessView()
+    if (ready && !fairness.canStart) {
+      this.manager.sendError(
+        session,
+        fairness.status === 'unfair' ? 'network_unfair' : 'network_measuring',
+        fairness.message,
+      )
+      this.sendRoom()
+      return
+    }
     this.seats[playerId].ready = ready
     this.touch()
+    if (this.seats.A?.ready && this.seats.B?.ready) {
+      if (this.fairnessView().canStart) this.startMatch()
+      else {
+        this.seats.A.ready = false
+        this.seats.B.ready = false
+        this.sendRoom()
+      }
+      return
+    }
     this.sendRoom()
-    if (this.seats.A?.ready && this.seats.B?.ready) this.startMatch()
   }
 
   startMatch() {
+    if (this.phase !== 'lobby' || !this.fairnessView().canStart) return
     this.phase = 'playing'
     this.roundNo = 0
     this.remaining = new Set(this.cards.map((card) => card.key))
@@ -409,30 +474,65 @@ class OnlineRoom {
       windowMs: ROUND_WINDOW_MS,
       audioUrl: `/api/online/room/${this.code}/audio/${token}`,
     })
-    this.roundTimer = setTimeout(() => this.resolveRound(null, 'timeout'), ROUND_LEAD_MS + ROUND_WINDOW_MS)
+    this.roundTimer = setTimeout(
+      () => this.resolveRound(null, 'timeout'),
+      ROUND_LEAD_MS + ROUND_WINDOW_MS + CLAIM_COMPENSATION_CAP_MS,
+    )
   }
 
   claim(session, message) {
     const playerId = this.playerIdFor(session)
     const current = this.current
-    if (!playerId || this.phase !== 'playing' || !current) return
+    if (!playerId || this.phase !== 'playing' || !current || current.resolved) return
     if (message.roundNo !== current.roundNo || current.claims.has(playerId)) return
     const cardKey = typeof message.cardKey === 'string' ? message.cardKey : ''
     if (!this.cardByKey.has(cardKey)) return
-    const now = Date.now()
-    const correct = now >= current.startAt && now <= current.endsAt && cardKey === current.cardKey
-    current.claims.set(playerId, { cardKey, correct })
+    const receivedAt = Date.now()
+    const rttMs = session.network?.rttMs
+    const compensationMs = Number.isFinite(rttMs)
+      ? Math.min(CLAIM_COMPENSATION_CAP_MS, Math.max(0, rttMs / 2))
+      : 0
+    const adjustedAt = receivedAt - compensationMs
+    const correct = adjustedAt >= current.startAt && adjustedAt <= current.endsAt && cardKey === current.cardKey
+    current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })
     this.touch()
     this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct })
-    if (correct) this.resolveRound(playerId, 'claimed')
+    if (correct) this.scheduleClaimSettlement()
+  }
+
+  scheduleClaimSettlement() {
+    const current = this.current
+    if (!current || current.resolved || current.settlementTimer) return
+    if (this.roundTimer) clearTimeout(this.roundTimer)
+    this.roundTimer = null
+    current.settlementTimer = setTimeout(() => {
+      current.settlementTimer = null
+      this.resolveRound(this.bestClaim(current), 'claimed')
+    }, CLAIM_SETTLE_DELAY_MS)
+  }
+
+  bestClaim(current) {
+    return (
+      [...current.claims.entries()]
+        .filter(([, claim]) => claim.correct)
+        .sort(
+          ([leftPlayer, left], [rightPlayer, right]) =>
+            left.adjustedAt - right.adjustedAt ||
+            left.receivedAt - right.receivedAt ||
+            leftPlayer.localeCompare(rightPlayer),
+        )[0]?.[0] || null
+    )
   }
 
   resolveRound(winner, reason) {
     const current = this.current
     if (!current || this.phase !== 'playing') return
     if (this.roundTimer) clearTimeout(this.roundTimer)
+    if (current.settlementTimer) clearTimeout(current.settlementTimer)
     this.roundTimer = null
-    this.current = { ...current, resolved: true }
+    current.settlementTimer = null
+    current.resolved = true
+    this.current = current
     this.remaining.delete(current.cardKey)
     if (winner) {
       this.scores[winner] += 1
@@ -494,7 +594,7 @@ class OnlineRoom {
     seat.disconnectedAt = Date.now()
     this.touch()
     this.broadcastPeer(playerId, false)
-    this.sendRoom()
+    this.networkChanged()
   }
 
   expireDisconnected(now) {
@@ -546,6 +646,21 @@ class OnlineRoom {
     }
   }
 
+  networkChanged() {
+    if (this.phase === 'lobby' && !this.fairnessView().canStart) {
+      let changed = false
+      for (const playerId of ['A', 'B']) {
+        const seat = this.seats[playerId]
+        if (seat?.ready) {
+          seat.ready = false
+          changed = true
+        }
+      }
+      if (changed) this.touch()
+    }
+    this.sendRoom()
+  }
+
   broadcastPeer(playerId, connected) {
     this.broadcast({ t: 'peer', playerId, connected })
   }
@@ -573,6 +688,7 @@ class OnlineRoom {
       remainingCardKeys: [...this.remaining],
       roundNo: this.roundNo,
       totalRounds: this.cards.length,
+      fairness: this.fairnessView(),
     }
   }
 
@@ -586,6 +702,60 @@ class OnlineRoom {
       ready: seat.ready,
       score: seat.score,
       correctClaims: seat.correctClaims,
+      network: this.networkView(playerId),
+    }
+  }
+
+  networkView(playerId) {
+    const samples = this.seats[playerId]?.socket?.network?.samples || []
+    return networkMetrics(samples)
+  }
+
+  fairnessView() {
+    const left = this.networkView('A')
+    const right = this.networkView('B')
+    const samplesReady = left.samples >= NETWORK_MIN_SAMPLES && right.samples >= NETWORK_MIN_SAMPLES
+    const rttGapMs = left.rttMs === null || right.rttMs === null ? null : roundMetric(Math.abs(left.rttMs - right.rttMs))
+    const jitterGapMs =
+      left.jitterMs === null || right.jitterMs === null
+        ? null
+        : roundMetric(Math.abs(left.jitterMs - right.jitterMs))
+    const maxJitterMs =
+      left.jitterMs === null || right.jitterMs === null ? null : Math.max(left.jitterMs, right.jitterMs)
+
+    if (!samplesReady) {
+      return {
+        status: 'measuring',
+        canStart: false,
+        rttGapMs,
+        jitterGapMs,
+        maxJitterMs,
+        message: `正在测量双方网络（A ${left.samples}/${NETWORK_MIN_SAMPLES}、B ${right.samples}/${NETWORK_MIN_SAMPLES} 次 Ping/Pong）`,
+      }
+    }
+
+    const unfairRtt = rttGapMs !== null && rttGapMs > NETWORK_MAX_RTT_GAP_MS
+    const unfairJitter =
+      (maxJitterMs !== null && maxJitterMs > NETWORK_MAX_JITTER_MS) ||
+      (jitterGapMs !== null && jitterGapMs > NETWORK_MAX_JITTER_GAP_MS)
+    if (unfairRtt || unfairJitter) {
+      return {
+        status: 'unfair',
+        canStart: false,
+        rttGapMs,
+        jitterGapMs,
+        maxJitterMs,
+        message: `当前网络延迟差距过大，不适合公平对战（RTT 差 ${rttGapMs ?? '-'}ms；抖动差 ${jitterGapMs ?? '-'}ms；最大抖动 ${maxJitterMs ?? '-'}ms）`,
+      }
+    }
+
+    return {
+      status: 'ready',
+      canStart: true,
+      rttGapMs,
+      jitterGapMs,
+      maxJitterMs,
+      message: '网络条件适合公平对战',
     }
   }
 
@@ -597,8 +767,10 @@ class OnlineRoom {
   clearTimers() {
     if (this.roundTimer) clearTimeout(this.roundTimer)
     if (this.nextRoundTimer) clearTimeout(this.nextRoundTimer)
+    if (this.current?.settlementTimer) clearTimeout(this.current.settlementTimer)
     this.roundTimer = null
     this.nextRoundTimer = null
+    if (this.current) this.current.settlementTimer = null
   }
 
   touch() {

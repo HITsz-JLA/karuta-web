@@ -59,6 +59,10 @@ function formatPackageProgress(progress: ImportProgress | null) {
   return '正在同步本地卡面库…'
 }
 
+function formatNetworkMetric(value: number | null) {
+  return value === null ? '测量中' : `${value} ms`
+}
+
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
   const { decks, loading: decksLoading, refresh: refreshDecks } = useDeckList()
@@ -667,6 +671,7 @@ export function OnlinePage() {
             <span className="versus-mark">VS</span>
             <PlayerBadge player={room.players.B} mine={room.you === 'B'} />
           </div>
+          <NetworkFairness room={room} />
           {!hasLocalRoomDeck ? (
             <div className="notice warn">{formatPackageProgress(packageProgress) || '正在准备本地卡面库…'}</div>
           ) : null}
@@ -677,7 +682,7 @@ export function OnlinePage() {
           </div>
           <div className="row spread">
             <span className="muted small">卡牌 {room.totalRounds} 张 · 双方准备后自动开局</span>
-            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !hasLocalRoomDeck} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
+            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !hasLocalRoomDeck || !room.fairness.canStart} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
               {ready ? '取消准备' : '准备开始'}
             </button>
           </div>
@@ -731,6 +736,7 @@ export function OnlinePage() {
         <span className="versus-mark">VS</span>
         <ScoreCard player={room.players[otherPlayer(room.you)]} score={scores[otherPlayer(room.you)]} winner={false} />
       </div>
+      <NetworkFairness room={room} compact />
 
       {canArrange ? (
         <div className="arrange-hint" role="status">
@@ -807,6 +813,29 @@ function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A'];
       <strong>{player?.nickname || '等待对手加入…'}</strong>
       {mine ? <span className="muted small">（你）</span> : null}
       {player?.ready ? <span className="ready-label">已准备</span> : null}
+    </div>
+  )
+}
+
+function NetworkFairness({ room, compact = false }: { room: OnlineRoomView; compact?: boolean }) {
+  const { fairness } = room
+  const statusLabel = fairness.status === 'ready' ? '可开始' : fairness.status === 'unfair' ? '不适合公平对战' : '测量中'
+  const metric = (player: OnlineRoomView['players']['A']) => {
+    if (!player) return '等待玩家'
+    return `RTT ${formatNetworkMetric(player.network.rttMs)} · 抖动 ${formatNetworkMetric(player.network.jitterMs)} · ${player.network.samples} 次`
+  }
+
+  return (
+    <div className={`network-fairness ${fairness.status}${compact ? ' compact' : ''}`} role={fairness.status === 'unfair' ? 'alert' : 'status'}>
+      <div className="row spread">
+        <strong>网络公平性</strong>
+        <span>{statusLabel}</span>
+      </div>
+      <p>{fairness.message}</p>
+      <div className="network-metrics">
+        <span>A · {metric(room.players.A)}</span>
+        <span>B · {metric(room.players.B)}</span>
+      </div>
     </div>
   )
 }

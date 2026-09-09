@@ -30,6 +30,24 @@ export interface OnlinePlayerView {
   ready: boolean
   score: number
   correctClaims: number
+  network: OnlineNetworkView
+}
+
+export interface OnlineNetworkView {
+  rttMs: number | null
+  jitterMs: number | null
+  samples: number
+}
+
+export type OnlineFairnessStatus = 'measuring' | 'ready' | 'unfair'
+
+export interface OnlineFairnessView {
+  status: OnlineFairnessStatus
+  canStart: boolean
+  rttGapMs: number | null
+  jitterGapMs: number | null
+  maxJitterMs: number | null
+  message: string
 }
 
 export interface OnlineRoomView {
@@ -44,6 +62,7 @@ export interface OnlineRoomView {
   remainingCardKeys: string[]
   roundNo: number
   totalRounds: number
+  fairness: OnlineFairnessView
 }
 
 export interface OnlineRoomSummary {
