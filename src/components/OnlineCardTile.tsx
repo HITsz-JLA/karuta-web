@@ -5,7 +5,7 @@ import type { OnlineCardView } from '../lib/onlineProtocol'
 
 interface Props {
   meta: OnlineCardView
-  card: CardEntry | null
+  card?: CardEntry | null
   available: boolean
   picked?: boolean
   result?: boolean
@@ -25,7 +25,7 @@ interface Props {
   onClick?: () => void
 }
 
-/** A board tile deliberately keeps the HITsz-JLA card image as its main cue. */
+/** A board tile deliberately keeps the local karuta card image as its main cue. */
 export function OnlineCardTile({
   meta,
   card,
@@ -47,7 +47,8 @@ export function OnlineCardTile({
   onPointerCancel,
   onClick,
 }: Props) {
-  const imageUrl = useObjectUrl(card?.imageBlobKey)
+  const localImageUrl = useObjectUrl(card?.imageBlobKey)
+  const imageUrl = meta.imageUrl || localImageUrl
   const className = [
     'online-card-tile',
     available ? 'available' : draggable ? 'arrangeable' : 'claimed',
@@ -83,9 +84,9 @@ export function OnlineCardTile({
       <span className="online-card-number">#{meta.number}</span>
       <div className="online-card-image">
         {imageUrl ? (
-          <img src={imageUrl} alt={meta.workName} />
+          <img src={imageUrl} alt={meta.workName} loading="lazy" decoding="async" />
         ) : (
-          <span className="online-card-missing">{card ? '暂无卡面' : '请加载同一数据包'}</span>
+          <span className="online-card-missing">{card ? '暂无卡面' : '服务器卡面加载中'}</span>
         )}
       </div>
       <span className="online-card-title">{meta.workName}</span>

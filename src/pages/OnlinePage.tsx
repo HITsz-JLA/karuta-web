@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
-import { useDeck, useDeckList } from '../hooks/useDecks'
 import {
-  onlineCardKey,
   type OnlineCardView,
   type OnlineRoomSummary,
   type OnlineRoundResult,
   type OnlineRoundStart,
   type OnlineRoomView,
   type OnlineServerMessage,
-  toOnlineCardInput,
 } from '../lib/onlineProtocol'
 import { OnlineSocket } from '../lib/onlineSocket'
-import { downloadServerPackage, listServerPackages } from '../lib/serverPackages'
-import { getDeck, saveDeck } from '../lib/storage'
-import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
-import type { CardEntry, DeckRecord } from '../types/models'
+import {
+  CURATED_MUCA_PACKAGES,
+  getServerPackageCatalog,
+  listServerPackages,
+  serverCardImageUrl,
+  type ServerPackage,
+  type ServerPackageCatalog,
+  type ServerPackageCatalogCard,
+} from '../lib/serverPackages'
 
 const MIN_CANDIDATE_CARDS = 60
 const MAX_CANDIDATE_CARDS = 500
@@ -39,29 +41,18 @@ function readNickname() {
   }
 }
 
-function cardMeta(card: CardEntry): OnlineCardView {
+function packageCardMeta(card: ServerPackageCatalogCard, packageId: string): OnlineCardView {
   return {
-    key: onlineCardKey(card),
+    key: card.key,
     number: card.number,
     imageName: card.imageName,
     workName: card.workName,
+    imageUrl: serverCardImageUrl(packageId, card.key),
   }
 }
 
 function otherPlayer(player: 'A' | 'B') {
   return player === 'A' ? 'B' : 'A'
-}
-
-function formatPackageProgress(progress: ImportProgress | null) {
-  if (!progress) return ''
-  if (progress.stage === 'reading' && progress.total) {
-    return `正在同步数据包 ${Math.min(Math.ceil(progress.current / 1024 / 1024), Math.ceil(progress.total / 1024 / 1024))}/${Math.ceil(progress.total / 1024 / 1024)} MB`
-  }
-  if (progress.stage === 'parsing') return '正在解析歌牌目录…'
-  if (progress.stage === 'resources' && progress.total) {
-    return `正在准备卡面与音频 ${Math.min(Math.ceil(progress.current), progress.total)}/${progress.total}`
-  }
-  return '正在同步本地卡面库…'
 }
 
 function formatNetworkMetric(value: number | null) {
@@ -70,12 +61,29 @@ function formatNetworkMetric(value: number | null) {
 
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
-  const { decks, loading: decksLoading, refresh: refreshDecks } = useDeckList()
-  const [selectedDeckId, setSelectedDeckId] = useState('')
-  const activeDeckId = selectedDeckId || decks[0]?.id || ''
-  const { deck: selectedDeck, loading: selectedDeckLoading } = useDeck(activeDeckId || undefined)
+  const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
+  const [packagesLoading, setPackagesLoading] = useState(true)
+  const [selectedPackageId, setSelectedPackageId] = useState('')
+  const [catalog, setCatalog] = useState<ServerPackageCatalog | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const onlinePackages = useMemo(
+    () =>
+      CURATED_MUCA_PACKAGES.map((meta) => ({
+        meta,
+        serverPackage: serverPackages.find((item) => item.id === meta.id),
+      })).filter(
+        (item): item is {
+          meta: (typeof CURATED_MUCA_PACKAGES)[number]
+          serverPackage: ServerPackage
+        } => Boolean(item.serverPackage),
+      ),
+    [serverPackages],
+  )
+  const activePackageId = onlinePackages.some(({ serverPackage }) => serverPackage.id === selectedPackageId)
+    ? selectedPackageId
+    : onlinePackages[0]?.serverPackage.id || ''
+  const selectedPackage = onlinePackages.find(({ serverPackage }) => serverPackage.id === activePackageId) || null
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
-  const [roomDeck, setRoomDeck] = useState<DeckRecord | null>(null)
   const [rooms, setRooms] = useState<OnlineRoomSummary[]>([])
   const [nickname, setNickname] = useState(readNickname)
   const [roomName, setRoomName] = useState('校园歌牌房间')
@@ -92,8 +100,6 @@ export function OnlinePage() {
   const [connected, setConnected] = useState(socket.connected)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [packageProgress, setPackageProgress] = useState<ImportProgress | null>(null)
-  const syncingPackage = useRef<string | null>(null)
   const roomRef = useRef<OnlineRoomView | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [boardOrder, setBoardOrder] = useState<string[]>([])
@@ -110,18 +116,57 @@ export function OnlinePage() {
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
 
   useEffect(() => {
-    if (!selectedDeck) return
-    const eligible = selectedDeck.cards.filter((card) => card.songs.length)
-    const available = Math.min(MAX_CANDIDATE_CARDS, eligible.length)
-    const nextSize = available >= MIN_CANDIDATE_CARDS ? available - (available % 2) : available
-    setBoardCount(nextSize || DEFAULT_CANDIDATE_CARDS)
-  }, [selectedDeck])
+    let cancelled = false
+    setPackagesLoading(true)
+    void listServerPackages()
+      .then((packages) => {
+        if (!cancelled) setServerPackages(packages)
+      })
+      .catch((error) => {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : '无法读取服务器 MUCA 牌组')
+      })
+      .finally(() => {
+        if (!cancelled) setPackagesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
-    if (!selectedDeck) return
-    const eligible = selectedDeck.cards.filter((card) => card.songs.length)
-    setSelectedIds(new Set(eligible.slice(0, Math.min(boardCount, MAX_CANDIDATE_CARDS)).map((card) => card.id)))
-  }, [boardCount, selectedDeck])
+    if (!activePackageId) {
+      setCatalog(null)
+      setCatalogLoading(false)
+      return
+    }
+    let cancelled = false
+    setCatalog(null)
+    setCatalogLoading(true)
+    void getServerPackageCatalog(activePackageId)
+      .then((nextCatalog) => {
+        if (!cancelled) setCatalog(nextCatalog)
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setCatalog(null)
+          setMessage(error instanceof Error ? error.message : '无法读取服务器牌组目录')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activePackageId])
+
+  useEffect(() => {
+    const cards = catalog?.cards || []
+    const available = Math.min(MAX_CANDIDATE_CARDS, cards.length)
+    const nextSize = available
+    setBoardCount(nextSize || DEFAULT_CANDIDATE_CARDS)
+    setSelectedIds(new Set(cards.slice(0, Math.min(nextSize || DEFAULT_CANDIDATE_CARDS, MAX_CANDIDATE_CARDS)).map((card) => card.key)))
+  }, [catalog])
 
   useEffect(() => {
     try {
@@ -280,76 +325,13 @@ export function OnlinePage() {
     }
   }, [room])
 
-  const displayDeck = useMemo(() => {
-    if (roomDeck?.sourcePackageId === room?.packageId) return roomDeck
-    if (selectedDeck?.sourcePackageId === room?.packageId) return selectedDeck
-    return roomDeck
-  }, [room, roomDeck, selectedDeck])
-
-  const localCards = useMemo(() => {
-    const map = new Map<string, CardEntry>()
-    for (const card of displayDeck?.cards || []) map.set(onlineCardKey(card), card)
-    return map
-  }, [displayDeck])
-
   const orderedRoomCards = useMemo(() => {
     return roomCards.slice(0, MAX_HAND_SLOTS)
   }, [roomCards])
 
-  useEffect(() => {
-    if (!room?.packageId || displayDeck?.sourcePackageId === room.packageId || syncingPackage.current === room.packageId) {
-      return
-    }
-    const packageId = room.packageId
-    let cancelled = false
-    syncingPackage.current = packageId
-    setPackageProgress({ stage: 'reading', current: 0, total: 0, fileName: packageId })
-    void (async () => {
-      try {
-        const known = decks.find((item) => item.sourcePackageId === packageId)
-        if (known) {
-          const found = await getDeck(known.id)
-          if (!cancelled && found) setRoomDeck(found)
-          return
-        }
-
-        const available = await listServerPackages()
-        const serverPackage = available.find((item) => item.id === packageId)
-        if (!serverPackage) throw new Error('房间使用的数据包当前不在服务器上')
-        const blob = await downloadServerPackage(serverPackage.id, serverPackage.size, ({ loaded, total }) => {
-          if (!cancelled) {
-            setPackageProgress({ stage: 'reading', current: loaded, total, fileName: serverPackage.fileName })
-          }
-        })
-        const imported = await importDeckZip(
-          new File([blob], serverPackage.fileName, { type: 'application/zip' }),
-          serverPackage.name,
-          (progress) => {
-            if (!cancelled) setPackageProgress(progress)
-          },
-          serverPackage.mode,
-        )
-        const synced = { ...imported, sourcePackageId: serverPackage.id }
-        await saveDeck(synced)
-        if (!cancelled) {
-          setRoomDeck(synced)
-          await refreshDecks()
-        }
-      } catch (error) {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : '无法同步房间卡面')
-      } finally {
-        syncingPackage.current = null
-        if (!cancelled) setPackageProgress(null)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [decks, displayDeck, refreshDecks, room?.packageId])
-
   const eligibleCards = useMemo(
-    () => selectedDeck?.cards.filter((card) => card.songs.length) || [],
-    [selectedDeck],
+    () => (catalog?.packageId === activePackageId ? catalog.cards : []),
+    [activePackageId, catalog],
   )
   const visibleCards = useMemo(() => {
     const query = keyword.trim().toLowerCase()
@@ -358,10 +340,8 @@ export function OnlinePage() {
       (card) => card.workName.toLowerCase().includes(query) || String(card.number).includes(query),
     )
   }, [eligibleCards, keyword])
-
   const me = room ? room.players[room.you] : null
   const opponent = room ? room.players[otherPlayer(room.you)] : null
-  const hasLocalRoomDeck = Boolean(displayDeck?.sourcePackageId === room?.packageId && localCards.size)
   const ownHandKeys = me?.handCardKeys || EMPTY_CARD_KEYS
   const opponentHandKeys = opponent?.handCardKeys || EMPTY_CARD_KEYS
   const orderedHandCards = useMemo(() => {
@@ -380,14 +360,13 @@ export function OnlinePage() {
   const canArrange = Boolean((room?.phase === 'arrange' || room?.phase === 'playing') && !round && !matchOver)
 
   const createRoom = useCallback(async () => {
-    if (!selectedDeck) return setMessage('请先选择本地数据集')
-    if (!selectedDeck.sourcePackageId) {
-      setMessage('在线房间需要服务器数据包，请先在首页加载服务器数据包')
+    if (!selectedPackage || !catalog) {
+      setMessage('请先选择服务器 MUCA 牌组')
       return
     }
-    const cards = selectedDeck.cards.filter((card) => selectedIds.has(card.id) && card.songs.length)
-    if (cards.length < MIN_CANDIDATE_CARDS || cards.length % 2 !== 0) {
-      setMessage(`在线歌牌需要选择至少 ${MIN_CANDIDATE_CARDS} 张卡牌，且数量必须为偶数`)
+    const cards = catalog.cards.filter((card) => selectedIds.has(card.key))
+    if (cards.length < MIN_CANDIDATE_CARDS) {
+      setMessage(`在线歌牌需要选择至少 ${MIN_CANDIDATE_CARDS} 张卡牌；奇数会由服务器随机弃置 1 张后平分`)
       return
     }
     setBusy(true)
@@ -398,18 +377,17 @@ export function OnlinePage() {
         t: 'createRoom',
         nickname: nickname.trim() || '玩家',
         name: roomName.trim() || '歌牌房间',
-        packageId: selectedDeck.sourcePackageId,
-        deckName: selectedDeck.name,
-        cards: cards.slice(0, MAX_CANDIDATE_CARDS).map(toOnlineCardInput),
+        packageId: selectedPackage.serverPackage.id,
+        deckName: selectedPackage.meta.name,
+        cardKeys: cards.slice(0, MAX_CANDIDATE_CARDS).map((card) => card.key),
       })
       if (!sent) throw new Error('在线连接已断开，请重试')
-      setRoomDeck(selectedDeck)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '创建房间失败')
     } finally {
       setBusy(false)
     }
-  }, [nickname, roomName, selectedDeck, selectedIds, socket])
+  }, [catalog, nickname, roomName, selectedIds, selectedPackage, socket])
 
   const joinRoom = useCallback(async () => {
     const code = joinCode.trim().toUpperCase()
@@ -436,7 +414,6 @@ export function OnlinePage() {
     phaseRef.current = null
     roomRef.current = null
     setRoom(null)
-    setRoomDeck(null)
     setRound(null)
     setLastResult(null)
     setMatchOver(null)
@@ -558,11 +535,11 @@ export function OnlinePage() {
     [clearDrag],
   )
 
-  function toggleSelected(card: CardEntry) {
+  function toggleSelected(card: ServerPackageCatalogCard) {
     setSelectedIds((previous) => {
       const next = new Set(previous)
-      if (next.has(card.id)) next.delete(card.id)
-      else if (next.size < boardCount) next.add(card.id)
+      if (next.has(card.key)) next.delete(card.key)
+      else if (next.size < boardCount) next.add(card.key)
       else setMessage(`本局最多选择 ${boardCount} 张卡牌`)
       return next
     })
@@ -570,17 +547,15 @@ export function OnlinePage() {
 
   function setBoardSize(value: number) {
     const input = Number.isFinite(value) ? Math.round(value) : DEFAULT_CANDIDATE_CARDS
-    let nextSize = Math.max(MIN_CANDIDATE_CARDS, Math.min(MAX_CANDIDATE_CARDS, input || DEFAULT_CANDIDATE_CARDS))
-    if (nextSize % 2 !== 0) nextSize -= 1
+    const nextSize = Math.max(MIN_CANDIDATE_CARDS, Math.min(MAX_CANDIDATE_CARDS, input || DEFAULT_CANDIDATE_CARDS))
     setBoardCount(nextSize)
     setSelectedIds((previous) => new Set([...previous].slice(0, nextSize)))
   }
 
   function selectAllCandidates() {
     const nextSize = Math.min(MAX_CANDIDATE_CARDS, eligibleCards.length)
-    const evenSize = nextSize - (nextSize % 2)
-    setBoardCount(evenSize)
-    setSelectedIds(new Set(eligibleCards.slice(0, evenSize).map((card) => card.id)))
+    setBoardCount(nextSize)
+    setSelectedIds(new Set(eligibleCards.slice(0, nextSize).map((card) => card.key)))
   }
 
   function toggleDraftCard(cardKey: string, limit: number, setter: Dispatch<SetStateAction<Set<string>>>) {
@@ -674,7 +649,7 @@ export function OnlinePage() {
           <div className="row spread">
             <div>
               <h1>在线 1v1 歌牌对战</h1>
-              <p>双方看到同一组 HITsz-JLA 卡面，听到歌曲后抢先点击对应卡牌。</p>
+              <p>双方看到同一组歌牌卡面，听到歌曲后抢先点击对应卡牌。</p>
             </div>
             <span className={`connection-chip${connected ? ' online' : ''}`}>
               {connected ? '在线服务已连接' : '正在连接…'}
@@ -686,7 +661,7 @@ export function OnlinePage() {
           <section className="panel warm stack">
             <div className="row spread">
               <strong>创建房间</strong>
-              <span className="muted small">同一数据包才能显示 HITsz-JLA 卡面</span>
+              <span className="muted small">服务器牌组提供同一套歌牌卡面</span>
             </div>
             <div className="field">
               <label htmlFor="onlineNickname">你的昵称</label>
@@ -697,23 +672,23 @@ export function OnlinePage() {
               <input id="roomName" value={roomName} maxLength={40} onChange={(event) => setRoomName(event.target.value)} />
             </div>
             <div className="field">
-              <label htmlFor="onlineDeck">使用数据集</label>
-              <select id="onlineDeck" value={activeDeckId} onChange={(event) => setSelectedDeckId(event.target.value)} disabled={decksLoading}>
-                <option value="">请选择数据集</option>
-                {decks.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name} · {item.cardCount} 张{item.sourcePackageId ? '' : '（需服务器包）'}
+              <label htmlFor="onlineDeck">使用服务器牌组</label>
+              <select id="onlineDeck" value={activePackageId} onChange={(event) => setSelectedPackageId(event.target.value)} disabled={packagesLoading || catalogLoading}>
+                <option value="">{onlinePackages.length ? '请选择服务器牌组' : '服务器暂无 MUCA 牌组'}</option>
+                {onlinePackages.map(({ meta, serverPackage }) => (
+                  <option key={serverPackage.id} value={serverPackage.id}>
+                    {meta.name} · {serverPackage.name}
                   </option>
                 ))}
               </select>
             </div>
-            {selectedDeck && !selectedDeck.sourcePackageId ? (
-              <p className="notice warn">当前是本地手工数据集。在线音频由服务器数据包按房间提供，请先回首页加载服务器数据包。</p>
+            {!packagesLoading && !onlinePackages.length ? (
+              <p className="notice warn">在线歌牌只使用服务器上的四套 MUCA 牌组，请联系管理员检查 data-packages。</p>
             ) : null}
             <div className="row">
               <div className="field" style={{ flex: '0 0 120px' }}>
                  <label htmlFor="boardCount">候选牌数量</label>
-                 <input id="boardCount" type="number" min={MIN_CANDIDATE_CARDS} max={MAX_CANDIDATE_CARDS} step={2} value={boardCount} onChange={(event) => setBoardSize(Number(event.target.value))} />
+                 <input id="boardCount" type="number" min={MIN_CANDIDATE_CARDS} max={MAX_CANDIDATE_CARDS} step={1} value={boardCount} onChange={(event) => setBoardSize(Number(event.target.value))} />
               </div>
               <div className="field" style={{ flex: 1 }}>
                 <label htmlFor="onlineSearch">筛选卡面</label>
@@ -721,33 +696,27 @@ export function OnlinePage() {
               </div>
             </div>
             <div className="row spread draft-selection-summary">
-              <p className="muted small">已选 {selectedIds.size} / {boardCount} 张；开局会随机拆成两份，每方再选 30 张。</p>
-              <button className="btn btn-secondary" type="button" onClick={selectAllCandidates} disabled={!eligibleCards.length}>全选可用牌</button>
+              <p className="muted small">已选 {selectedIds.size} / {boardCount} 张；奇数会由服务器随机弃置 1 张后平分，再由双方各选 30 张。</p>
+              <button className="btn btn-secondary" type="button" onClick={selectAllCandidates} disabled={!eligibleCards.length}>全选服务器牌组</button>
             </div>
-            <div className="online-select-grid">
-              {selectedDeckLoading ? <div className="empty-state">正在加载本地卡面…</div> : null}
-              {!selectedDeckLoading
-                ? visibleCards.map((card) => (
-                    <OnlineCardTile
-                      key={card.id}
-                      meta={cardMeta(card)}
-                      card={card}
-                      available
-                      picked={selectedIds.has(card.id)}
-                      onClick={() => toggleSelected(card)}
-                    />
-                  ))
-                : null}
-            </div>
-            {!eligibleCards.length && !selectedDeckLoading ? <div className="empty-state">没有可用于在线对战的卡牌</div> : null}
-            <button className="btn btn-primary btn-lg" type="button" onClick={() => void createRoom()} disabled={busy || !connected}>
+            {catalogLoading ? <div className="empty-state">正在读取服务器牌组目录…</div> : null}
+            {!catalogLoading && catalog?.packageId === activePackageId && eligibleCards.length ? (
+              <VirtualServerCardGrid
+                cards={visibleCards}
+                packageId={activePackageId}
+                selected={selectedIds}
+                onToggle={toggleSelected}
+              />
+            ) : null}
+            {!catalogLoading && !eligibleCards.length ? <div className="empty-state">服务器牌组没有可用于在线对战的卡牌</div> : null}
+            <button className="btn btn-primary btn-lg" type="button" onClick={() => void createRoom()} disabled={busy || !connected || catalogLoading || !selectedPackage}>
               {busy ? '创建中…' : '创建歌牌房间'}
             </button>
           </section>
 
           <section className="panel cool stack">
             <strong>加入房间</strong>
-            <p className="muted small">输入朋友分享的 6 位房间码；若本机没有同一数据包，页面会自动从服务器同步。</p>
+            <p className="muted small">输入朋友分享的 6 位房间码；加入后直接读取服务器牌组，不需要本机预先导入 ZIP。</p>
             <div className="row">
               <div className="field" style={{ flex: 1 }}>
                 <label htmlFor="joinCode">房间码</label>
@@ -782,8 +751,8 @@ export function OnlinePage() {
                <span className="muted small">3. 开局排牌 3 分钟：只可调整自己的 3×9 牌区</span>
                <span className="muted small">4. 空牌或选错会暂停抢牌，由对手选择转来一张牌</span>
             </div>
-            <Link className="btn btn-secondary" to="/">
-              回首页加载或管理数据包
+            <Link className="btn btn-secondary" to="/admin">
+              管理服务器牌组
             </Link>
           </section>
         </div>
@@ -805,7 +774,7 @@ export function OnlinePage() {
             </div>
             <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出房间</button>
           </div>
-          <p className="muted small">把房间码分享给对手。双方看到的是真实卡面，歌名不会在开局前下发。</p>
+          <p className="muted small">把房间码分享给对手。双方直接使用服务器牌组看到同一套真实卡面，歌名不会在开局前下发。</p>
         </section>
 
         <section className="panel stack">
@@ -815,17 +784,14 @@ export function OnlinePage() {
             <PlayerBadge player={room.players.B} mine={room.you === 'B'} />
           </div>
           <NetworkFairness room={room} />
-          {!hasLocalRoomDeck ? (
-            <div className="notice warn">{formatPackageProgress(packageProgress) || '正在准备本地卡面库…'}</div>
-          ) : null}
           <div className="online-board compact">
             {orderedRoomCards.map((meta) => (
-              <OnlineCardTile key={meta.key} meta={meta} card={localCards.get(meta.key) || null} available={false} />
+              <OnlineCardTile key={meta.key} meta={meta} available={false} />
             ))}
           </div>
           <div className="row spread">
              <span className="muted small">候选牌 {room.cards.length} 张 · 准备后进入选牌、互换和 BAN</span>
-            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !hasLocalRoomDeck || !room.fairness.canStart} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
+            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !room.fairness.canStart} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
               {ready ? '取消准备' : '准备开始'}
             </button>
           </div>
@@ -852,7 +818,6 @@ export function OnlinePage() {
           title="从你的随机牌池选择 30 张"
           description="选定后会锁定，等对手也完成选择；对手不会看到你的选择进度以外的内容。"
           cards={draftPoolCards}
-          localCards={localCards}
           selected={draftSelection}
           limit={DRAFT_SELECTION_SIZE}
           opponentCount={room.draft.opponentSelectedCount}
@@ -861,7 +826,6 @@ export function OnlinePage() {
           onToggle={(key) => toggleDraftCard(key, DRAFT_SELECTION_SIZE, setDraftSelection)}
           onSubmit={submitDraftSelection}
         />
-        {packageProgress ? <div className="notice">{formatPackageProgress(packageProgress)}</div> : null}
         {message ? <div className="toast">{message}</div> : null}
       </div>
     )
@@ -884,7 +848,6 @@ export function OnlinePage() {
           title="从互换牌中 BAN 5 张"
           description="BAN 只作用于你收到的这 30 张牌；双方完成后会同时进入三分钟排牌准备。"
           cards={draftExchangeCards}
-          localCards={localCards}
           selected={draftBans}
           limit={BAN_SIZE}
           opponentCount={room.draft.opponentBannedCount}
@@ -893,7 +856,6 @@ export function OnlinePage() {
           onToggle={(key) => toggleDraftCard(key, BAN_SIZE, setDraftBans)}
           onSubmit={submitDraftBan}
         />
-        {packageProgress ? <div className="notice">{formatPackageProgress(packageProgress)}</div> : null}
         {message ? <div className="toast">{message}</div> : null}
       </div>
     )
@@ -923,7 +885,6 @@ export function OnlinePage() {
   }
 
   const resultMeta = lastResult ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
-  const resultCard = resultMeta ? localCards.get(resultMeta.key) || null : null
   const scores = lastResult?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
   const isOpeningArrange = room.phase === 'arrange'
   const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer)
@@ -990,7 +951,6 @@ export function OnlinePage() {
         <TransferPanel
           room={room}
           cards={room.cards}
-          localCards={localCards}
           onGiveCard={giveCard}
         />
       ) : null}
@@ -1003,11 +963,10 @@ export function OnlinePage() {
             <button className="btn btn-secondary" type="button" onClick={unlockAudio}>启用音频</button>
           </div>
         </div>
-        <p className="muted small">卡面图片来自当前 HITsz-JLA 数据包；抢牌时点击双方牌区中的对应卡面，空槽点击也会按选错处理。</p>
+        <p className="muted small">卡面图片来自当前歌牌数据包；抢牌时点击双方牌区中的对应卡面，空槽点击也会按选错处理。</p>
         <HandArea
           title={`你的牌区 · ${ownHandKeys.length}/${MAX_HAND_SLOTS}`}
           cards={orderedHandCards}
-          localCards={localCards}
           mine
           canArrange={canArrange}
           pinMode={pinMode}
@@ -1030,7 +989,6 @@ export function OnlinePage() {
         <HandArea
           title={`对手牌区 · ${opponentHandKeys.length}/${MAX_HAND_SLOTS}`}
           cards={opponentHandKeys.map((key) => room.cards.find((card) => card.key === key)).filter((card): card is OnlineCardView => Boolean(card))}
-          localCards={localCards}
           claimable={canClaim}
           resultKey={lastResult?.cardKey || null}
           pickedKey={opponentClaim?.cardKey || null}
@@ -1045,7 +1003,7 @@ export function OnlinePage() {
             <span className="muted small">{lastResult.reason === 'timeout' ? '时间到' : '抢牌结算'}</span>
           </div>
           <div className="online-result-body">
-            <OnlineCardTile meta={resultMeta} card={resultCard} available result />
+            <OnlineCardTile meta={resultMeta} available result />
             <div className="stack">
               <span className="muted small">对应歌曲</span>
               <strong>{lastResult.song.displayName}</strong>
@@ -1055,8 +1013,76 @@ export function OnlinePage() {
         </section>
       ) : null}
 
-      {packageProgress ? <div className="notice">{formatPackageProgress(packageProgress)}</div> : null}
       {message ? <div className="toast">{message}</div> : null}
+    </div>
+  )
+}
+
+interface VirtualServerCardGridProps {
+  cards: ServerPackageCatalogCard[]
+  packageId: string
+  selected: Set<string>
+  onToggle: (card: ServerPackageCatalogCard) => void
+}
+
+/**
+ * Keeps the complete server catalog scrollable while mounting only the rows
+ * around the viewport. This avoids a 400+ card React/DOM task without hiding
+ * cards behind a manual "load more" action.
+ */
+function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: VirtualServerCardGridProps) {
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const [viewport, setViewport] = useState({ width: 0, height: 520 })
+  const [scrollTop, setScrollTop] = useState(0)
+
+  useEffect(() => {
+    const element = viewportRef.current
+    if (!element) return
+    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight || 520 })
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const columns = viewport.width >= 560 ? 3 : 2
+  const cardWidth = Math.max(120, (viewport.width - (columns - 1) * 10 - 6) / columns)
+  const rowHeight = Math.ceil(cardWidth * 1.34 + 98)
+  const rowCount = Math.ceil(cards.length / columns)
+  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
+  const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
+  const startIndex = firstRow * columns
+  const renderedCards = cards.slice(startIndex, lastRow * columns)
+
+  return (
+    <div
+      className="online-select-viewport"
+      ref={viewportRef}
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+      aria-label={`服务器牌组，共 ${cards.length} 张卡面`}
+    >
+      <div className="online-select-canvas" style={{ height: `${rowCount * rowHeight}px` }}>
+        <div
+          className="online-select-window"
+          style={{
+            top: `${firstRow * rowHeight}px`,
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+            gridAutoRows: `${rowHeight}px`,
+          }}
+        >
+          {renderedCards.map((card) => (
+            <OnlineCardTile
+              key={card.key}
+              meta={packageCardMeta(card, packageId)}
+              card={null}
+              available
+              picked={selected.has(card.key)}
+              onClick={() => onToggle(card)}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -1065,7 +1091,6 @@ interface DraftCardPickerProps {
   title: string
   description: string
   cards: OnlineCardView[]
-  localCards: Map<string, CardEntry>
   selected: Set<string>
   limit: number
   opponentCount: number
@@ -1079,7 +1104,6 @@ function DraftCardPicker({
   title,
   description,
   cards,
-  localCards,
   selected,
   limit,
   opponentCount,
@@ -1106,7 +1130,6 @@ function DraftCardPicker({
           <OnlineCardTile
             key={meta.key}
             meta={meta}
-            card={localCards.get(meta.key) || null}
             available
             picked={selected.has(meta.key)}
             onClick={() => onToggle(meta.key)}
@@ -1124,7 +1147,6 @@ function DraftCardPicker({
 interface HandAreaProps {
   title: string
   cards: OnlineCardView[]
-  localCards: Map<string, CardEntry>
   mine?: boolean
   canArrange?: boolean
   pinMode?: boolean
@@ -1148,7 +1170,6 @@ interface HandAreaProps {
 function HandArea({
   title,
   cards,
-  localCards,
   mine = false,
   canArrange = false,
   pinMode = false,
@@ -1182,7 +1203,6 @@ function HandArea({
             <OnlineCardTile
               key={meta.key}
               meta={meta}
-              card={localCards.get(meta.key) || null}
               available={claimable && !canArrange}
               picked={pickedKey === meta.key}
               result={resultKey === meta.key}
@@ -1224,12 +1244,10 @@ function HandArea({
 function TransferPanel({
   room,
   cards,
-  localCards,
   onGiveCard,
 }: {
   room: OnlineRoomView
   cards: OnlineCardView[]
-  localCards: Map<string, CardEntry>
   onGiveCard: (cardKey: string) => void
 }) {
   const pending = room.pendingTransfer
@@ -1255,7 +1273,6 @@ function TransferPanel({
             <OnlineCardTile
               key={meta.key}
               meta={meta}
-              card={localCards.get(meta.key) || null}
               available
               stateLabel="点击转牌"
               onClick={() => onGiveCard(meta.key)}

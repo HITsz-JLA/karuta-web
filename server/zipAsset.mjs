@@ -13,7 +13,7 @@ const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
  * package. The existing data packages can be hundreds of megabytes, so loading
  * them through JSZip for every online round would make a room unusable.
  */
-export async function readZipAsset(filePath, requestPath, fallbackName = '') {
+export async function readZipAsset(filePath, requestPath, fallbackName = '', kind = 'audio') {
   const handle = await fs.open(filePath, 'r')
   try {
     const { size } = await handle.stat()
@@ -36,13 +36,13 @@ export async function readZipAsset(filePath, requestPath, fallbackName = '') {
     const directory = Buffer.alloc(directorySize)
     await readAt(handle, directory, directoryOffset)
     const members = parseDirectory(directory, entries)
-    const member = findMember(members, requestPath, fallbackName)
-    if (!member) throw new Error('找不到音频资源')
-    if (member.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) throw new Error('音频资源过大')
+    const member = findMember(members, requestPath, fallbackName, kind)
+    if (!member) throw new Error(`找不到${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源`)
+    if (member.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) throw new Error(`${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源过大`)
 
     const localHeader = Buffer.alloc(30)
     await readAt(handle, localHeader, member.localHeaderOffset)
-    if (localHeader.readUInt32LE(0) !== LOCAL_FILE_HEADER) throw new Error('ZIP 音频头无效')
+    if (localHeader.readUInt32LE(0) !== LOCAL_FILE_HEADER) throw new Error('ZIP 资源头无效')
     const localNameLength = localHeader.readUInt16LE(26)
     const localExtraLength = localHeader.readUInt16LE(28)
     const dataOffset = member.localHeaderOffset + 30 + localNameLength + localExtraLength
@@ -52,8 +52,8 @@ export async function readZipAsset(filePath, requestPath, fallbackName = '') {
     let data
     if (member.compression === 0) data = compressed
     else if (member.compression === 8) data = await inflateRawAsync(compressed)
-    else throw new Error('ZIP 音频压缩格式不受支持')
-    if (data.byteLength !== member.uncompressedSize) throw new Error('ZIP 音频大小校验失败')
+    else throw new Error('ZIP 资源压缩格式不受支持')
+    if (data.byteLength !== member.uncompressedSize) throw new Error('ZIP 资源大小校验失败')
     return { data, name: member.name }
   } finally {
     await handle.close()
@@ -96,7 +96,7 @@ function parseDirectory(buffer, expectedEntries) {
   return members
 }
 
-function findMember(members, requestPath, fallbackName) {
+function findMember(members, requestPath, fallbackName, kind) {
   const requested = normalize(requestPath)
   const fallback = normalize(fallbackName)
   const direct = members.find((member) => {
@@ -105,18 +105,18 @@ function findMember(members, requestPath, fallbackName) {
   })
   if (direct) return direct
 
-  const relative = audioRelativePath(requested)
+  const relative = kind === 'image' ? imageRelativePath(requested) : audioRelativePath(requested)
   if (relative) {
     const segment = members.find((member) => {
       const name = normalize(member.name)
-      return isSegmentName(name) && name.endsWith(`/${relative}`)
+      return (kind === 'image' ? isImageName(name) : isSegmentName(name)) && name.endsWith(`/${relative}`)
     })
     if (segment) return segment
   }
 
   if (!fallback) return null
   const byName = members.filter((member) => normalize(member.name).endsWith(`/${fallback}`) || normalize(member.name) === fallback)
-  return byName.find((member) => isSegmentName(normalize(member.name))) || byName[0] || null
+  return byName.find((member) => (kind === 'image' ? isImageName(normalize(member.name)) : isSegmentName(normalize(member.name)))) || byName[0] || null
 }
 
 function audioRelativePath(value) {
@@ -128,6 +128,15 @@ function audioRelativePath(value) {
 
 function isSegmentName(value) {
   return /(?:^|\/)(?:seg_30|segments?|music)\//.test(value) && !/(?:^|\/)full\//.test(value)
+}
+
+function imageRelativePath(value) {
+  if (!value) return ''
+  return value.replace(/^.*\/(?:music_cover|images|covers)\//, '')
+}
+
+function isImageName(value) {
+  return /(?:^|\/)(?:music_cover|images|covers)\//.test(value)
 }
 
 function normalize(value) {

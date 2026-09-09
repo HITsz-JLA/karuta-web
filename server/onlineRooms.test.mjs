@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import JSZip from 'jszip'
 import { OnlineRoomManager } from './onlineRooms.mjs'
 
 class FakeSocket {
@@ -14,19 +15,18 @@ class FakeSocket {
   }
 }
 
-function card(number, name) {
-  return {
-    key: `${number}|images/${number}.jpg|${name}`,
-    number,
-    imageName: `${number}.jpg`,
-    imagePath: `images/${number}.jpg`,
-    workName: name,
-    songs: [{ fileName: `${number}.mp3`, displayName: `歌曲${number}`, sourcePath: `mp3_files/seg_30/answer/${number}.mp3` }],
+async function writeCatalogPackage(directory, count = 60) {
+  const zip = new JSZip()
+  const rows = ['category,work_number,work_name,song_slot,song_title,audio_file,audio_path,cover_files,cover_paths']
+  for (let index = 1; index <= count; index += 1) {
+    rows.push(`anime,${index},作品${index},1,歌曲${index},${index}.mp3,mp3_files/seg_30/anime/${index}.mp3,${index}.jpg,images/${index}.jpg`)
+    zip.file(`images/${index}.jpg`, Buffer.from(`image-${index}`))
+    zip.file(`mp3_files/seg_30/anime/${index}.mp3`, Buffer.from(`audio-${index}`))
   }
-}
-
-function candidateCards(count = 60) {
-  return Array.from({ length: count }, (_, index) => card(index + 1, `作品${index + 1}`))
+  const packageId = 'jla-muca-anime-lite.zip'
+  zip.file('meta/metadata.csv', rows.join('\n'))
+  await writeFile(path.join(directory, packageId), await zip.generateAsync({ type: 'nodebuffer' }))
+  return packageId
 }
 
 function latest(socket, type) {
@@ -80,7 +80,7 @@ test('two players can create, join, ready, receive a round and claim a card', as
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-'))
   const manager = new OnlineRoomManager(temp, { maxRooms: 2 })
   try {
-    await writeFile(path.join(temp, 'deck.zip'), Buffer.from('placeholder'))
+    const packageId = await writeCatalogPackage(temp)
     const hostSocket = new FakeSocket()
     const guestSocket = new FakeSocket()
     const host = manager.connect(hostSocket)
@@ -89,14 +89,16 @@ test('two players can create, join, ready, receive a round and claim a card', as
       t: 'createRoom',
       nickname: '房主',
       name: '测试房',
-      packageId: 'deck.zip',
+      packageId,
       deckName: '测试数据集',
-      cards: candidateCards(),
     }))
     const roomMessage = latest(hostSocket, 'room')
     assert.ok(roomMessage)
     assert.equal(roomMessage.room.players.A.nickname, '房主')
     assert.equal(roomMessage.room.cards[0].workName, '作品1')
+    assert.match(roomMessage.room.cards[0].imageUrl, /card-image/)
+    const image = await manager.getPackageCardImage(packageId, roomMessage.room.cards[0].key)
+    assert.deepEqual(image.data, Buffer.from('image-1'))
     assert.equal('songs' in roomMessage.room.cards[0], false)
 
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: roomMessage.room.code, nickname: '对手' }))
@@ -127,11 +129,37 @@ test('two players can create, join, ready, receive a round and claim a card', as
   }
 })
 
+test('odd candidate pools discard one server-side card before splitting', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-odd-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp, 61)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    assert.equal(created.room.cards.length, 60)
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const draft = latest(hostSocket, 'room').room
+    assert.equal(draft.phase, 'draft_select')
+    assert.equal(draft.draft.poolCardKeys.length, 30)
+    assert.equal(latest(guestSocket, 'room').room.draft.poolCardKeys.length, 30)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('network measurements block unfair rooms before the match starts', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-network-'))
   const manager = new OnlineRoomManager(temp)
   try {
-    await writeFile(path.join(temp, 'deck.zip'), Buffer.from('placeholder'))
+    const packageId = await writeCatalogPackage(temp)
     const hostSocket = new FakeSocket()
     const guestSocket = new FakeSocket()
     const host = manager.connect(hostSocket)
@@ -139,8 +167,7 @@ test('network measurements block unfair rooms before the match starts', async ()
     await manager.handle(host, JSON.stringify({
       t: 'createRoom',
       nickname: 'host',
-      packageId: 'deck.zip',
-      cards: candidateCards(),
+      packageId,
     }))
     const created = latest(hostSocket, 'room')
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
@@ -170,7 +197,7 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-compensation-'))
   const manager = new OnlineRoomManager(temp)
   try {
-    await writeFile(path.join(temp, 'deck.zip'), Buffer.from('placeholder'))
+    const packageId = await writeCatalogPackage(temp)
     const hostSocket = new FakeSocket()
     const guestSocket = new FakeSocket()
     const host = manager.connect(hostSocket)
@@ -178,8 +205,7 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
     await manager.handle(host, JSON.stringify({
       t: 'createRoom',
       nickname: 'host',
-      packageId: 'deck.zip',
-      cards: candidateCards(),
+      packageId,
     }))
     const created = latest(hostSocket, 'room')
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
@@ -208,7 +234,7 @@ test('an empty or wrong claim pauses the round until the opponent gives one card
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-transfer-'))
   const manager = new OnlineRoomManager(temp)
   try {
-    await writeFile(path.join(temp, 'deck.zip'), Buffer.from('placeholder'))
+    const packageId = await writeCatalogPackage(temp)
     const hostSocket = new FakeSocket()
     const guestSocket = new FakeSocket()
     const host = manager.connect(hostSocket)
@@ -216,8 +242,7 @@ test('an empty or wrong claim pauses the round until the opponent gives one card
     await manager.handle(host, JSON.stringify({
       t: 'createRoom',
       nickname: 'host',
-      packageId: 'deck.zip',
-      cards: candidateCards(),
+      packageId,
     }))
     const created = latest(hostSocket, 'room')
     await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
@@ -257,7 +282,6 @@ test('invalid rooms fail closed before a room is created', async () => {
       t: 'createRoom',
       nickname: '房主',
       packageId: '../secret.zip',
-      cards: candidateCards(),
     }))
     const error = latest(socket, 'error')
     assert.equal(error.code, 'bad_room')

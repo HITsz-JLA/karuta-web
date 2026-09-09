@@ -257,6 +257,52 @@ app.get('/api/packages', async (_request, response, next) => {
   }
 })
 
+app.get('/api/packages/:id/catalog', async (request, response, next) => {
+  try {
+    const catalog = await onlineRooms.getPackageCatalog(request.params.id)
+    if (!catalog) {
+      response.status(404).json({ message: '在线 MUCA 牌组不存在' })
+      return
+    }
+    response.json({
+      catalog: {
+        packageId: catalog.packageId,
+        deckName: catalog.deckName,
+        cards: catalog.cards.map(({ key, number, imageName, workName, songs }) => ({
+          key,
+          number,
+          imageName,
+          workName,
+          songCount: songs.length,
+        })),
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/packages/:id/card-image', async (request, response, next) => {
+  try {
+    const cardKey = typeof request.query.cardKey === 'string' ? request.query.cardKey : ''
+    const image = await onlineRooms.getPackageCardImage(request.params.id, cardKey)
+    if (!image) {
+      response.status(404).json({ message: '歌牌卡面不存在' })
+      return
+    }
+    response.setHeader('Content-Type', imageMime(image.name))
+    response.setHeader('Cache-Control', 'public, max-age=86400, immutable')
+    response.setHeader('Content-Length', String(image.data.byteLength))
+    response.send(image.data)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      response.status(404).json({ message: '歌牌卡面资源不存在' })
+      return
+    }
+    next(error)
+  }
+})
+
 app.get('/api/packages/:id/download', async (request, response, next) => {
   try {
     const packagePath = packagePathFromId(request.params.id)
@@ -388,6 +434,15 @@ function audioMime(fileName) {
   if (ext === '.wav') return 'audio/wav'
   if (ext === '.flac') return 'audio/flac'
   return 'audio/mpeg'
+}
+
+function imageMime(fileName) {
+  const ext = path.extname(fileName || '').toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.bmp') return 'image/bmp'
+  return 'image/jpeg'
 }
 
 const httpServer = createServer(app)

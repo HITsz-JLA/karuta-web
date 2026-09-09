@@ -1,6 +1,8 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
+import { CURATED_PACKAGE_IDS, findCatalogCard, loadPackageCatalog } from './packageCatalog.mjs'
+import { readZipAsset } from './zipAsset.mjs'
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 const ROOM_CODE_LENGTH = 6
@@ -181,6 +183,25 @@ export class OnlineRoomManager {
     return { ...asset, packagePath: path.join(this.dataDir, asset.packageId) }
   }
 
+  async getPackageCatalog(packageId) {
+    if (!CURATED_PACKAGE_IDS.has(packageId)) return null
+    const packagePath = path.join(this.dataDir, packageId)
+    try {
+      return await loadPackageCatalog(packagePath, packageId)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  async getPackageCardImage(packageId, cardKey) {
+    const catalog = await this.getPackageCatalog(packageId)
+    const card = catalog && findCatalogCard(catalog, cardKey)
+    if (!card) return null
+    const packagePath = path.join(this.dataDir, packageId)
+    return readZipAsset(packagePath, card.imagePath, card.imageName, 'image')
+  }
+
   dispose() {
     clearInterval(this.cleanupTimer)
     for (const room of this.rooms.values()) room.dispose()
@@ -226,29 +247,37 @@ export class OnlineRoomManager {
     const nickname = sanitizeText(message.nickname, MAX_NICKNAME_LENGTH)
     const name = sanitizeText(message.name, MAX_ROOM_NAME_LENGTH) || '歌牌房间'
     const packageId = safePackageId(message.packageId)
-    const deckName = sanitizeText(message.deckName, 80) || packageId.replace(/\.zip$/i, '')
-    const cards = normalizeCards(message.cards)
     if (!nickname) {
       this.sendError(session, 'bad_nickname', '请输入昵称')
       return
     }
-    if (!packageId || !cards.ok) {
+    if (!packageId || !CURATED_PACKAGE_IDS.has(packageId)) {
+      this.sendError(session, 'bad_room', '在线歌牌只能使用服务器上的四套 MUCA 牌组')
+      return
+    }
+    const catalog = await this.getPackageCatalog(packageId)
+    if (!catalog) {
+      this.sendError(session, 'package_not_found', '服务器找不到该 MUCA 牌组或牌组目录无效')
+      return
+    }
+    const requestedKeys = Array.isArray(message.cardKeys)
+      ? [...new Set(message.cardKeys.filter((key) => typeof key === 'string'))]
+      : catalog.cards.map((card) => card.key)
+    const requested = new Set(requestedKeys)
+    const cards = normalizeCards(catalog.cards.filter((card) => requested.has(card.key)))
+    const deckName = sanitizeText(message.deckName, 80) || catalog.deckName
+    if (!cards.ok) {
       this.sendError(session, 'bad_room', cards.message || '房间数据无效')
       return
     }
-    try {
-      await fs.access(path.join(this.dataDir, packageId))
-    } catch {
-      this.sendError(session, 'package_not_found', '服务器找不到该数据包，请重新加载数据包后重试')
-      return
-    }
 
+    const roomCards = cards.value.length % 2 === 0 ? cards.value : shuffle(cards.value).slice(0, -1)
     const room = new OnlineRoom(this, {
       code: this.newCode(),
       name,
       packageId,
       deckName,
-      cards: cards.value,
+      cards: roomCards,
     })
     this.rooms.set(room.code, room)
     this.joinSeat(room, session, nickname, 'A')
@@ -899,7 +928,13 @@ class OnlineRoom {
         A: this.playerView('A'),
         B: this.playerView('B'),
       },
-      cards: this.cards.map(({ key, number, imageName, workName }) => ({ key, number, imageName, workName })),
+      cards: this.cards.map(({ key, number, imageName, workName }) => ({
+        key,
+        number,
+        imageName,
+        workName,
+        imageUrl: `/api/packages/${encodeURIComponent(this.packageId)}/card-image?cardKey=${encodeURIComponent(key)}`,
+      })),
       remainingCardKeys: [...this.remaining],
       roundNo: this.roundNo,
       totalRounds: HAND_SIZE * 2,
@@ -1034,8 +1069,8 @@ class OnlineRoom {
 }
 
 function normalizeCards(input) {
-  if (!Array.isArray(input) || input.length < MIN_CANDIDATE_CARDS || input.length > MAX_CARDS || input.length % 2 !== 0) {
-    return { ok: false, message: `请准备 ${MIN_CANDIDATE_CARDS}-${MAX_CARDS} 张偶数张卡牌，才能随机分成两份` }
+  if (!Array.isArray(input) || input.length < MIN_CANDIDATE_CARDS || input.length > MAX_CARDS) {
+    return { ok: false, message: `请准备 ${MIN_CANDIDATE_CARDS}-${MAX_CARDS} 张卡牌，才能随机分成两份` }
   }
   const keys = new Set()
   const cards = []
