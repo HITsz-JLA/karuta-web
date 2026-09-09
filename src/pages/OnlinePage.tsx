@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type PointerEvent, type SetStateAction } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import {
@@ -30,6 +30,17 @@ const REST_AUDIO_VOLUME = 0.28
 const EMPTY_CARD_KEYS: string[] = []
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
+type BattleStyle = 'text' | 'card'
+
+const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
+
+function readBattleStyle(): BattleStyle {
+  try {
+    return localStorage.getItem(BATTLE_STYLE_STORAGE_KEY) === 'text' ? 'text' : 'card'
+  } catch {
+    return 'card'
+  }
+}
 
 function createSilentAudioUrl() {
   const sampleRate = 8_000
@@ -170,6 +181,7 @@ export function OnlinePage() {
   const [arrangeRemaining, setArrangeRemaining] = useState(0)
   const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(new Set())
   const [pinMode, setPinMode] = useState(false)
+  const [battleStyle, setBattleStyle] = useState<BattleStyle>(readBattleStyle)
   const draggingKeyRef = useRef<string | null>(null)
   const dragOverSlotRef = useRef<number | null>(null)
   const announcedArrangeReadyRef = useRef<number | null>(null)
@@ -177,6 +189,15 @@ export function OnlinePage() {
   const publishedLayoutRoundRef = useRef<number | null>(null)
   const phaseRef = useRef<OnlineRoomView['phase'] | null>(null)
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
+  const roundRef = useRef<OnlineRoundStart | null>(round)
+  const myClaimRef = useRef<ClaimState | null>(myClaim)
+  const roundRemainingRef = useRef(roundRemaining)
+
+  useEffect(() => {
+    roundRef.current = round
+    myClaimRef.current = myClaim
+    roundRemainingRef.current = roundRemaining
+  }, [myClaim, round, roundRemaining])
 
   function playReadyCue() {
     try {
@@ -259,6 +280,14 @@ export function OnlinePage() {
       // The nickname is a convenience only.
     }
   }, [nickname])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(BATTLE_STYLE_STORAGE_KEY, battleStyle)
+    } catch {
+      // The view preference is optional.
+    }
+  }, [battleStyle])
 
   useEffect(() => {
     const offMessage = socket.on((incoming) => {
@@ -824,14 +853,14 @@ export function OnlinePage() {
     if (!socket.send({ t: 'banCards', cardKeys: [...draftBans] })) setMessage('连接已断开，BAN 没有送达')
   }
 
-  function togglePinned(cardKey: string) {
+  const togglePinned = useCallback((cardKey: string) => {
     setPinnedKeys((previous) => {
       const next = new Set(previous)
       if (next.has(cardKey)) next.delete(cardKey)
       else next.add(cardKey)
       return next
     })
-  }
+  }, [])
 
   function sortOwnHand(mode: 'random' | 'name') {
     setBoardSlots((previous) => {
@@ -859,18 +888,22 @@ export function OnlinePage() {
     })
   }
 
-  function claimCard(cardKey: string) {
-    if (!room || !round || myClaim || room.pendingTransfer || (cardKey && !room.remainingCardKeys.includes(cardKey))) return
-    if (!socket.send({ t: 'claim', roundNo: round.roundNo, cardKey, clientAt: Math.max(0, round.windowMs - roundRemaining) })) {
+  const claimCard = useCallback((cardKey: string) => {
+    const currentRoom = roomRef.current
+    const currentRound = roundRef.current
+    if (!currentRoom || !currentRound || myClaimRef.current || currentRoom.pendingTransfer || (cardKey && !currentRoom.remainingCardKeys.includes(cardKey))) return
+    if (!socket.send({ t: 'claim', roundNo: currentRound.roundNo, cardKey, clientAt: Math.max(0, currentRound.windowMs - roundRemainingRef.current) })) {
       setMessage('连接已断开，本次抢牌没有送达')
       return
     }
-    setMyClaim({ cardKey, correct: null })
-  }
+    const nextClaim = { cardKey, correct: null }
+    myClaimRef.current = nextClaim
+    setMyClaim(nextClaim)
+  }, [socket])
 
-  function giveCard(cardKey: string) {
+  const giveCard = useCallback((cardKey: string) => {
     if (!socket.send({ t: 'giveCard', cardKey })) setMessage('连接已断开，转牌没有送达')
-  }
+  }, [socket])
 
   function toggleReady() {
     if (!room || (!isOpeningArrange && !isResting) || room.pendingTransfer) return
@@ -1078,10 +1111,10 @@ export function OnlinePage() {
             </div>
             <div className="online-rules stack">
               <strong>玩法</strong>
-               <span className="muted small">1. 候选牌随机分成两份，双方各选 30 张并互换</span>
-               <span className="muted small">2. 双方各从收到的 30 张中 BAN 5 张，剩余各 25 张</span>
-               <span className="muted small">3. 开局排牌 3 分钟；3×11 是 33 个固定可放置槽位，只能调整自己的牌区</span>
-               <span className="muted small">4. 空牌歌曲来自场外 20 首，单次出现后移出空牌池；点击场上任一卡面都不会判错</span>
+              <span className="muted small">1. 候选牌随机分成两份，双方各选 30 张并互换</span>
+              <span className="muted small">2. 双方各从收到的 30 张中 BAN 5 张，剩余各 25 张</span>
+              <span className="muted small">3. 开局排牌 3 分钟；3×11 是 33 个固定可放置槽位，只能调整自己的牌区</span>
+              <span className="muted small">4. 空牌歌曲来自场外 20 首，单次出现后移出空牌池；没有对应卡面，点击任一卡面都会判错</span>
                <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
                <span className="muted small">6. 开局排牌和休息阶段都可提前准备；开局双方准备后 20 秒进入游戏，休息阶段双方准备后 5 秒进入下一回合</span>
             </div>
@@ -1259,7 +1292,7 @@ export function OnlinePage() {
               : '准备下一回合…'
 
   return (
-    <div className="online-page online-match-page">
+    <div className={`online-page online-match-page online-style-${battleStyle}`}>
       <section className="hero">
         <div className="row spread">
           <div>
@@ -1276,11 +1309,32 @@ export function OnlinePage() {
 
       <section className="panel stack online-game-panel">
         <div className="online-game-header">
-          <div>
+          <div className="online-game-heading">
             <strong>歌牌棋盘</strong>
             <span className="muted small">服务器歌牌卡面 · 牌位调整只保留在自己的视角</span>
           </div>
-          <span className="chip">{round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
+          <div className="online-game-header-tools">
+            <span className="chip">{round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
+            <div className="online-style-switch" role="group" aria-label="对战视图">
+              <span className="online-style-caption">视图</span>
+              <button
+                className={`online-style-button${battleStyle === 'text' ? ' active' : ''}`}
+                type="button"
+                aria-pressed={battleStyle === 'text'}
+                onClick={() => setBattleStyle('text')}
+              >
+                文字注重
+              </button>
+              <button
+                className={`online-style-button${battleStyle === 'card' ? ' active' : ''}`}
+                type="button"
+                aria-pressed={battleStyle === 'card'}
+                onClick={() => setBattleStyle('card')}
+              >
+                卡面注重
+              </button>
+            </div>
+          </div>
         </div>
         <div className="online-match-layout">
           <div className="online-match-board">
@@ -1591,7 +1645,7 @@ interface HandAreaProps {
   onPointerCancel?: (event: PointerEvent<HTMLButtonElement>) => void
 }
 
-function HandArea({
+const HandArea = memo(function HandArea({
   title,
   slotCards,
   mine = false,
@@ -1674,7 +1728,7 @@ function HandArea({
       </div>
     </section>
   )
-}
+})
 
 function TransferPanel({ room }: { room: OnlineRoomView }) {
   const pending = room.pendingTransfer

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
+import { HomeNowPlaying } from '../components/HomeNowPlaying'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
 import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
@@ -176,17 +177,18 @@ export function HomePage() {
             </Link>
           </div>
         </div>
-        <div className="home-stage-visual" aria-hidden="true">
+        <div className="home-stage-visual" aria-label="首页歌曲试听">
           <div className="home-stage-aura home-stage-aura-one" />
           <div className="home-stage-aura home-stage-aura-two" />
           <div className="home-beat-ring home-beat-ring-one" />
           <div className="home-beat-ring home-beat-ring-two" />
-          <div className="home-live-card">
-            <span className="home-live-card-label">NOW PLAYING</span>
-            <strong>{previewCard?.workName || 'SELECT A SONG'}</strong>
-            <span>{deck?.name || '本地歌牌曲库'}</span>
-          </div>
-          <div className="home-equalizer">
+          <HomeNowPlaying
+            deck={deck}
+            selectedCard={previewCard}
+            volume={settings.volume}
+            onVolumeChange={(volume) => void update({ volume })}
+          />
+          <div className={`home-equalizer${deck?.cards.some((card) => card.songs.length) ? '' : ' paused'}`}>
             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((bar) => (
               <i key={bar} style={{ animationDelay: `${bar * 70}ms` }} />
             ))}

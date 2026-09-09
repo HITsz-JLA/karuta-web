@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent, type PointerEvent } from 'react'
+import { memo, useEffect, useState, type DragEvent, type PointerEvent } from 'react'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import type { CardEntry } from '../types/models'
 import type { OnlineCardView } from '../lib/onlineProtocol'
@@ -114,7 +114,7 @@ function useCachedImageUrl(imageUrl: string | undefined) {
 }
 
 /** A board tile deliberately keeps the local karuta card image as its main cue. */
-export function OnlineCardTile({
+export const OnlineCardTile = memo(function OnlineCardTile({
   meta,
   card,
   available,
@@ -185,4 +185,4 @@ export function OnlineCardTile({
       {pinned ? <span className="online-card-state">已固定</span> : stateLabel ? <span className="online-card-state">{stateLabel}</span> : !available ? <span className="online-card-state">已收取</span> : null}
     </button>
   )
-}
+})

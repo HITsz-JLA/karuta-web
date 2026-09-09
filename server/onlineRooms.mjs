@@ -783,7 +783,7 @@ class OnlineRoom {
       : 0
     const adjustedAt = receivedAt - compensationMs
     if (adjustedAt < current.startAt || adjustedAt > current.endsAt) return
-    const correct = current.isEmpty ? Boolean(cardKey && this.isCardOnBoard(cardKey)) : cardKey === current.cardKey
+    const correct = !current.isEmpty && cardKey === current.cardKey
     this.touch()
     if (correct) {
       current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })

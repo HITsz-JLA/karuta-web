@@ -355,7 +355,7 @@ test('a wrong claim automatically transfers one card when the transfer window ex
   }
 })
 
-test('empty-song rounds use 20 outside songs once and keep real cards on the board', async () => {
+test('empty-song rounds use 20 outside songs once and treat every card click as wrong', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-empty-'))
   const manager = new OnlineRoomManager(temp)
   const originalRandom = Math.random
@@ -392,13 +392,25 @@ test('empty-song rounds use 20 outside songs once and keep real cards on the boa
     room.current.endsAt = Date.now() + 5_000
     const cardKey = room.seats.A.handCardKeys[0]
     const before = new Set(room.remaining)
+    const hostHandBefore = room.seats.A.handCardKeys.length
+    const guestHandBefore = room.seats.B.handCardKeys.length
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey, clientAt: 1 }))
-    await new Promise((resolve) => setTimeout(resolve, 160))
+    assert.equal(room.pendingTransfer.reason, 'wrong_claim')
+    assert.notEqual(room.current.resolved, true)
+    assert.equal(latest(hostSocket, 'roundResult'), undefined)
+    assert.deepEqual(new Set(room.remaining), before)
+    assert.equal(room.seats.A.handCardKeys.length, hostHandBefore)
+    assert.equal(room.seats.B.handCardKeys.length, guestHandBefore)
+
+    const gift = room.seats.B.handCardKeys[0]
+    await manager.handle(guest, JSON.stringify({ t: 'giveCard', cardKey: gift }))
     const result = latest(hostSocket, 'roundResult')
     assert.equal('isEmpty' in result, false)
-    assert.equal(result.winner, 'A')
+    assert.equal(result.winner, null)
+    assert.equal(result.reason, 'wrong')
     assert.deepEqual(new Set(result.remainingCardKeys), before)
-    assert.equal(room.seats.A.handCardKeys.length, 25)
+    assert.equal(room.seats.A.handCardKeys.length, hostHandBefore + 1)
+    assert.equal(room.seats.B.handCardKeys.length, guestHandBefore - 1)
     assert.ok(room.current.restSong)
     assert.ok(latest(hostSocket, 'room').room.restAudioUrl)
     const fieldSongIds = new Set(room.cards.flatMap((card) => card.songs).map((song) => JSON.stringify(song)))
