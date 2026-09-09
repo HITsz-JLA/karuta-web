@@ -78,6 +78,7 @@ export interface OnlineRoomView {
   arrangeReadyStartAtServerTime: number | null
   restReadyStartAtServerTime: number | null
   roundNo: number
+  matchWinner: OnlinePlayerId | null
   fairness: OnlineFairnessView
   draft: OnlineDraftView
   pendingTransfer: OnlinePendingTransferView | null

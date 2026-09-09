@@ -446,6 +446,7 @@ class OnlineRoom {
     this.roundNo = 0
     this.remaining = new Set(this.cards.map((card) => card.key))
     this.scores = EMPTY_SCORES()
+    this.matchWinner = null
     this.current = null
     this.roundTimer = null
     this.nextRoundTimer = null
@@ -570,6 +571,7 @@ class OnlineRoom {
     this.roundNo = 0
     this.remaining = new Set()
     this.scores = EMPTY_SCORES()
+    this.matchWinner = null
     this.current = null
     this.pendingTransfer = null
     this.arrangeEndsAt = null
@@ -834,6 +836,13 @@ class OnlineRoom {
     return emptyPlayers.length === 1 ? emptyPlayers[0] : null
   }
 
+  finishIfHandEmpty() {
+    const winner = this.emptyHandWinner()
+    if (!winner) return false
+    this.endMatch(winner)
+    return true
+  }
+
   scheduleTransferFallback(current, delay = WRONG_TRANSFER_TIMEOUT_MS) {
     if (current.transferTimer) clearTimeout(current.transferTimer)
     current.transferTimer = setTimeout(() => {
@@ -852,9 +861,8 @@ class OnlineRoom {
       this.sendRoom()
       if (pending.reason === 'wrong_claim') this.resolveRound(null, 'wrong', false)
       else if (pending.reason === 'opponent_card') {
-        const emptyHandWinner = this.emptyHandWinner()
-        if (emptyHandWinner) this.endMatch(emptyHandWinner)
-        else if (!this.remaining.size) this.endMatch()
+        if (this.finishIfHandEmpty()) return
+        if (!this.remaining.size) this.endMatch()
         else this.scheduleNextRound(Math.max(0, current.restEndsAtServerTime - Date.now()))
       }
     }, Math.max(0, delay))
@@ -901,9 +909,8 @@ class OnlineRoom {
     this.sendRoom()
     if (pending.reason === 'wrong_claim') this.resolveRound(null, 'wrong', false)
     else if (pending.reason === 'opponent_card') {
-      const emptyHandWinner = this.emptyHandWinner()
-      if (emptyHandWinner) this.endMatch(emptyHandWinner)
-      else if (!this.remaining.size) this.endMatch()
+      if (this.finishIfHandEmpty()) return true
+      if (!this.remaining.size) this.endMatch()
       else this.scheduleNextRound(Math.max(0, this.current?.restEndsAtServerTime - Date.now()))
     }
     return true
@@ -1012,7 +1019,8 @@ class OnlineRoom {
     this.phase = 'over'
     this.current = null
     const emptyHandWinner = this.emptyHandWinner()
-    const matchWinner = winner || emptyHandWinner || (this.scores.A === this.scores.B ? null : this.scores.A > this.scores.B ? 'A' : 'B')
+    const matchWinner = winner || emptyHandWinner
+    this.matchWinner = matchWinner
     this.touch()
     this.broadcast({ t: 'matchOver', winner: matchWinner, scores: { ...this.scores }, rounds: this.roundNo })
     this.sendRoom()
@@ -1086,6 +1094,7 @@ class OnlineRoom {
     this.restReadyStartAt = null
     this.arrangeReadyStartAt = null
     this.scores = EMPTY_SCORES()
+    this.matchWinner = null
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (seat) {
@@ -1211,6 +1220,7 @@ class OnlineRoom {
       arrangeReadyStartAtServerTime: this.arrangeReadyStartAt,
       restReadyStartAtServerTime: this.restReadyStartAt,
       roundNo: this.roundNo,
+      matchWinner: this.matchWinner,
       fairness: this.fairnessView(),
       draft: this.draftView(you),
       pendingTransfer: this.pendingTransfer,

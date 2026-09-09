@@ -1347,7 +1347,7 @@ export function OnlinePage() {
 
   if (room.phase === 'over' || matchOver) {
     const scores = matchOver?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
-    const winner = matchOver?.winner || (scores.A === scores.B ? null : scores.A > scores.B ? 'A' : 'B')
+    const winner = matchOver ? matchOver.winner : room.matchWinner
     return (
       <div className="online-page">
         <section className="hero">

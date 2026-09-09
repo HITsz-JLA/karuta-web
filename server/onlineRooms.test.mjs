@@ -631,6 +631,7 @@ test('a player wins immediately when claiming their own last card without a tran
     assert.equal(room.pendingTransfer, null)
     assert.equal(latest(hostSocket, 'roundResult').winner, 'A')
     assert.equal(latest(hostSocket, 'matchOver').winner, 'A')
+    assert.equal(latest(hostSocket, 'room').room.matchWinner, 'A')
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -682,6 +683,57 @@ test('a player wins after giving their last card in the required exchange', asyn
     assert.equal(room.phase, 'over')
     assert.equal(room.nextRoundTimer, null)
     assert.equal(latest(hostSocket, 'matchOver').winner, 'A')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('the card giver wins when a wrong-claim exchange removes their last card', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-empty-hand-wrong-transfer-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+
+    const hostCard = room.seats.A.handCardKeys[0]
+    const guestLastCard = room.seats.B.handCardKeys[0]
+    room.seats.A.handCardKeys = [hostCard]
+    room.seats.B.handCardKeys = [guestLastCard]
+    room.remaining = new Set([hostCard, guestLastCard])
+    room.current.isEmpty = false
+    room.current.cardKey = hostCard
+    room.current.song = room.cardByKey.get(hostCard).songs[0]
+    room.current.startAt = Date.now() - 100
+    room.current.endsAt = Date.now() + 5_000
+
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey: '', clientAt: 1 }))
+    assert.equal(room.pendingTransfer.reason, 'wrong_claim')
+
+    await manager.handle(guest, JSON.stringify({ t: 'giveCard', cardKey: guestLastCard }))
+
+    assert.equal(room.seats.B.handCardKeys.length, 0)
+    assert.equal(room.seats.A.handCardKeys.length, 2)
+    assert.equal(room.pendingTransfer, null)
+    assert.equal(room.phase, 'over')
+    assert.equal(room.matchWinner, 'B')
+    assert.equal(latest(hostSocket, 'roundResult').reason, 'wrong')
+    assert.equal(latest(hostSocket, 'matchOver').winner, 'B')
+    assert.equal(latest(hostSocket, 'room').room.matchWinner, 'B')
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
