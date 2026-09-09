@@ -791,6 +791,11 @@ class OnlineRoom {
       this.scheduleClaimSettlement()
       return
     }
+    if (this.roundTimer) clearTimeout(this.roundTimer)
+    this.roundTimer = null
+    if (current.settlementTimer) clearTimeout(current.settlementTimer)
+    current.settlementTimer = null
+    current.claims.clear()
     const to = otherPlayer(playerId)
     this.pendingTransfer = {
       from: playerId,
@@ -814,7 +819,7 @@ class OnlineRoom {
     return ['A', 'B'].find((playerId) => this.seats[playerId]?.handCardKeys.includes(cardKey)) || null
   }
 
-  scheduleTransferFallback(current) {
+  scheduleTransferFallback(current, delay = WRONG_TRANSFER_TIMEOUT_MS) {
     if (current.transferTimer) clearTimeout(current.transferTimer)
     current.transferTimer = setTimeout(() => {
       current.transferTimer = null
@@ -835,7 +840,7 @@ class OnlineRoom {
         if (!this.remaining.size) this.endMatch()
         else this.scheduleNextRound(Math.max(0, current.restEndsAtServerTime - Date.now()))
       }
-    }, WRONG_TRANSFER_TIMEOUT_MS)
+    }, Math.max(0, delay))
   }
 
   giveCard(session, message) {

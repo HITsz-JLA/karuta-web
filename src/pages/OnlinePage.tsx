@@ -271,6 +271,12 @@ export function OnlinePage() {
           phaseRef.current = incoming.room.phase
           roomRef.current = incoming.room
           setRoom(incoming.room)
+          if (previousPhase === 'arrange' && incoming.room.phase !== 'arrange') {
+            draggingKeyRef.current = null
+            dragOverSlotRef.current = null
+            setDraggingKey(null)
+            setDragOverSlot(null)
+          }
           setLastResult((previous) => (incoming.room.phase === 'playing' ? previous : null))
           if (incoming.room.phase === 'lobby') {
             setRound(null)
@@ -576,7 +582,9 @@ export function OnlinePage() {
     return room?.draft.exchangeCardKeys.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card)) || []
   }, [room?.draft.exchangeCardKeys, roomCards])
   const isResting = Boolean(room?.phase === 'playing' && restRemaining > 0 && !round && !matchOver)
-  const canArrange = Boolean((room?.phase === 'arrange' || isResting) && !matchOver && !round)
+  const canArrange = Boolean(
+    ((room?.phase === 'arrange' && arrangeRemaining > 0) || isResting) && !matchOver && !round,
+  )
 
   useEffect(() => {
     if (room?.phase !== 'playing') {
@@ -682,6 +690,11 @@ export function OnlinePage() {
     setDraggingKey(null)
     setDragOverSlot(null)
   }, [])
+
+  useEffect(() => {
+    if (canArrange || !draggingKeyRef.current) return
+    clearDrag()
+  }, [canArrange, clearDrag])
 
   const handleDragStart = useCallback(
     (event: DragEvent<HTMLButtonElement>, cardKey: string) => {

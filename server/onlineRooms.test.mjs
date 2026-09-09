@@ -290,6 +290,8 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     assert.equal(room.pendingTransfer.reason, 'wrong_claim')
     assert.ok(room.pendingTransfer.expiresAtServerTime - Date.now() > 39_000)
     assert.ok(room.current.restEndsAtServerTime - Date.now() > 39_000)
+    assert.equal(room.roundTimer, null)
+    assert.equal(room.current.settlementTimer, null)
     assert.equal(latest(hostSocket, 'claimFeedback').penalty, true)
 
     const gift = room.seats.B.handCardKeys[0]
@@ -300,6 +302,53 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     assert.equal(latest(hostSocket, 'cardTransfer').cardKey, gift)
     assert.equal(latest(hostSocket, 'roundResult').reason, 'wrong')
     assert.equal(latest(hostSocket, 'roundResult').remainingCardKeys.includes(room.current.cardKey), true)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('a wrong claim automatically transfers one card when the transfer window expires', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-transfer-timeout-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    await new Promise((resolve) => setTimeout(resolve, 1_450))
+
+    const round = latest(hostSocket, 'roundStart')
+    if (room.current.isEmpty) {
+      const cardKey = [...room.remaining][0]
+      room.current.isEmpty = false
+      room.current.cardKey = cardKey
+      room.current.song = room.cardByKey.get(cardKey).songs[0]
+    }
+    const hostHandBefore = room.seats.A.handCardKeys.length
+    const guestHandBefore = room.seats.B.handCardKeys.length
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: '', clientAt: 1 }))
+    assert.equal(room.pendingTransfer.reason, 'wrong_claim')
+    assert.equal(room.roundTimer, null)
+    assert.equal(room.current.settlementTimer, null)
+
+    room.scheduleTransferFallback(room.current, 10)
+    await new Promise((resolve) => setTimeout(resolve, 35))
+
+    assert.equal(room.pendingTransfer, null)
+    assert.equal(room.seats.A.handCardKeys.length, hostHandBefore + 1)
+    assert.equal(room.seats.B.handCardKeys.length, guestHandBefore - 1)
+    assert.equal(latest(hostSocket, 'cardTransfer').automatic, true)
+    assert.equal(latest(hostSocket, 'roundResult').reason, 'wrong')
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
