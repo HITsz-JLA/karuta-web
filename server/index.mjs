@@ -355,7 +355,6 @@ app.use((error, _request, response, _next) => {
 app.listen(port, host, () => {
   console.log(`Karuta Web server listening on http://${host}:${port}`)
   if (!process.env.ADMIN_PASSWORD) {
-    console.log(`管理员密码：${adminPassword}`)
-    console.log(`密码文件：${path.join(dataDir, '.admin-password')}`)
+    console.log('管理员密码已保存到受保护文件，不会写入服务日志')
   }
 })
