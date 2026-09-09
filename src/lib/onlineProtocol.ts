@@ -15,12 +15,14 @@ export interface OnlinePlayerView {
   nickname: string
   connected: boolean
   ready: boolean
+  restReady: boolean
   score: number
   correctClaims: number
   network: OnlineNetworkView
   selectedCount: number
   bannedCount: number
   handCardKeys: string[]
+  layoutCardKeys: Array<string | null> | null
 }
 
 export interface OnlineNetworkView {
@@ -70,11 +72,10 @@ export interface OnlineRoomView {
   players: Record<OnlinePlayerId, OnlinePlayerView | null>
   cards: OnlineCardView[]
   remainingCardKeys: string[]
-  emptyRemainingCount: number
   restEndsAtServerTime: number | null
-  restReason: 'wrong_claim' | 'opponent_card' | 'round' | 'empty' | null
+  restAudioUrl: string | null
+  restReadyStartAtServerTime: number | null
   roundNo: number
-  totalRounds: number
   fairness: OnlineFairnessView
   draft: OnlineDraftView
   pendingTransfer: OnlinePendingTransferView | null
@@ -103,6 +104,7 @@ export type OnlineClientMessage =
   | { t: 'ready'; ready: boolean }
   | { t: 'selectCards'; cardKeys: string[] }
   | { t: 'banCards'; cardKeys: string[] }
+  | { t: 'arrangeLayout'; cardKeys: Array<string | null> }
   | { t: 'giveCard'; cardKey: string }
   | { t: 'claim'; roundNo: number; cardKey: string; clientAt: number }
   | { t: 'leaveRoom' }
@@ -113,7 +115,6 @@ export interface OnlineRoundStart {
   roundNo: number
   startAtServerTime: number
   windowMs: number
-  isEmpty: boolean
   audioUrl: string
 }
 
@@ -121,7 +122,6 @@ export interface OnlineRoundResult {
   t: 'roundResult'
   roundNo: number
   cardKey: string
-  isEmpty: boolean
   winner: OnlinePlayerId | null
   reason: 'claimed' | 'timeout' | 'wrong'
   song: { displayName: string; fileName: string }

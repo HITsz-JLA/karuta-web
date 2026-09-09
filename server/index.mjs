@@ -383,10 +383,27 @@ app.get('/api/online/room/:code/audio/:token', async (request, response, next) =
       return
     }
     const media = await readZipAsset(asset.packagePath, asset.sourcePath, asset.fileName)
+    const data = media.data
+    const range = parseByteRange(request.headers.range, data.byteLength)
     response.setHeader('Content-Type', audioMime(media.name || asset.fileName))
     response.setHeader('Cache-Control', 'private, no-store')
-    response.setHeader('Content-Length', String(media.data.byteLength))
-    response.send(media.data)
+    response.setHeader('Accept-Ranges', 'bytes')
+    if (range?.invalid) {
+      response.status(416)
+      response.setHeader('Content-Range', `bytes */${data.byteLength}`)
+      response.end()
+      return
+    }
+    if (range) {
+      const chunk = data.subarray(range.start, range.end + 1)
+      response.status(206)
+      response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${data.byteLength}`)
+      response.setHeader('Content-Length', String(chunk.byteLength))
+      response.send(chunk)
+      return
+    }
+    response.setHeader('Content-Length', String(data.byteLength))
+    response.send(data)
   } catch (error) {
     if (error?.code === 'ENOENT') {
       response.status(404).json({ message: '音频资源不存在' })
@@ -434,6 +451,30 @@ function audioMime(fileName) {
   if (ext === '.wav') return 'audio/wav'
   if (ext === '.flac') return 'audio/flac'
   return 'audio/mpeg'
+}
+
+function parseByteRange(header, totalBytes) {
+  if (!header) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim())
+  if (!match || totalBytes <= 0) return { invalid: true }
+  const requestedStart = match[1] ? Number(match[1]) : null
+  const requestedEnd = match[2] ? Number(match[2]) : null
+  if (
+    (requestedStart !== null && !Number.isSafeInteger(requestedStart)) ||
+    (requestedEnd !== null && !Number.isSafeInteger(requestedEnd)) ||
+    (requestedStart === null && requestedEnd === null)
+  ) {
+    return { invalid: true }
+  }
+  if (requestedStart === null) {
+    const suffixLength = Math.min(requestedEnd, totalBytes)
+    if (suffixLength <= 0) return { invalid: true }
+    return { start: totalBytes - suffixLength, end: totalBytes - 1 }
+  }
+  if (requestedStart >= totalBytes) return { invalid: true }
+  const end = requestedEnd === null ? totalBytes - 1 : Math.min(requestedEnd, totalBytes - 1)
+  if (end < requestedStart) return { invalid: true }
+  return { start: requestedStart, end }
 }
 
 function imageMime(fileName) {

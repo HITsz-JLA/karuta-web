@@ -13,11 +13,12 @@ const MAX_CARDS = 500
 const DRAFT_SELECTION_SIZE = 30
 const BAN_SIZE = 5
 const HAND_SIZE = DRAFT_SELECTION_SIZE - BAN_SIZE
-const MAX_HAND_SLOTS = 27
-const EMPTY_SONG_COUNT = 50
+const MAX_HAND_SLOTS = 33
+const EMPTY_SONG_COUNT = 20
 const ARRANGE_WINDOW_MS = 3 * 60 * 1000
 const REST_WINDOW_MS = 40_000
 const WRONG_TRANSFER_TIMEOUT_MS = REST_WINDOW_MS
+const REST_AUDIO_GRACE_MS = 10_000
 const ROUND_WINDOW_MS = 10_000
 const ROUND_LEAD_MS = 750
 const ROOM_TTL_MS = 30 * 60 * 1000
@@ -141,6 +142,9 @@ export class OnlineRoomManager {
           break
         case 'banCards':
           this.currentRoom(session)?.banCards(session, message)
+          break
+        case 'arrangeLayout':
+          this.currentRoom(session)?.arrangeLayout(session, message)
           break
         case 'giveCard':
           this.currentRoom(session)?.giveCard(session, message)
@@ -322,6 +326,7 @@ export class OnlineRoomManager {
       socket: session,
       resumeToken,
       ready: false,
+      restReady: false,
       score: 0,
       correctClaims: 0,
       poolCardKeys: [],
@@ -329,6 +334,7 @@ export class OnlineRoomManager {
       exchangeCardKeys: [],
       bannedCardKeys: [],
       handCardKeys: [],
+      layoutCardKeys: [],
       disconnectedAt: null,
     }
     session.room = room
@@ -436,6 +442,9 @@ class OnlineRoom {
     this.arrangeEndsAt = null
     this.emptySongs = []
     this.emptyRemainingSongs = []
+    this.restSongs = []
+    this.restRemainingSongs = []
+    this.restReadyStartAt = null
     this.pendingTransfer = null
     this.lastActivity = Date.now()
     this.disposed = false
@@ -457,7 +466,12 @@ class OnlineRoom {
 
   setReady(session, ready) {
     const playerId = this.playerIdFor(session)
-    if (!playerId || this.phase !== 'lobby') return
+    if (!playerId) return
+    if (this.phase === 'playing') {
+      this.setRestReady(playerId, ready)
+      return
+    }
+    if (this.phase !== 'lobby') return
     const fairness = this.fairnessView()
     if (ready && !fairness.canStart) {
       this.manager.sendError(
@@ -482,6 +496,24 @@ class OnlineRoom {
     this.sendRoom()
   }
 
+  setRestReady(playerId, ready) {
+    const current = this.current
+    if (!current?.resolved || !current.restEndsAtServerTime || Date.now() >= current.restEndsAtServerTime || this.pendingTransfer) return
+    const seat = this.seats[playerId]
+    if (!seat) return
+    seat.restReady = ready
+    if (!ready && this.restReadyStartAt) {
+      this.restReadyStartAt = null
+      this.scheduleNextRound(Math.max(0, current.restEndsAtServerTime - Date.now()))
+    }
+    if (this.seats.A?.restReady && this.seats.B?.restReady && !this.restReadyStartAt) {
+      this.restReadyStartAt = Date.now() + 5_000
+      this.scheduleNextRound(5_000)
+    }
+    this.touch()
+    this.sendRoom()
+  }
+
   beginDraft() {
     if (this.phase !== 'lobby' || !this.fairnessView().canStart) return
     const keys = shuffle(this.cards.map((card) => card.key))
@@ -490,6 +522,7 @@ class OnlineRoom {
       const seat = this.seats[playerId]
       if (!seat) continue
       seat.ready = false
+      seat.restReady = false
       seat.score = 0
       seat.correctClaims = 0
       seat.poolCardKeys = playerId === 'A' ? keys.slice(0, midpoint) : keys.slice(midpoint)
@@ -497,6 +530,7 @@ class OnlineRoom {
       seat.exchangeCardKeys = []
       seat.bannedCardKeys = []
       seat.handCardKeys = []
+      seat.layoutCardKeys = []
     }
     this.phase = 'draft_select'
     this.roundNo = 0
@@ -507,6 +541,9 @@ class OnlineRoom {
     this.arrangeEndsAt = null
     this.emptySongs = []
     this.emptyRemainingSongs = []
+    this.restSongs = []
+    this.restRemainingSongs = []
+    this.restReadyStartAt = null
     this.touch()
     this.sendRoom()
   }
@@ -573,11 +610,33 @@ class OnlineRoom {
     this.remaining = new Set([...this.seats.A.handCardKeys, ...this.seats.B.handCardKeys])
     this.emptySongs = buildEmptySongPool(this.catalogCards, this.remaining)
     this.emptyRemainingSongs = [...this.emptySongs]
+    this.restSongs = buildRestSongPool(this.catalogCards, this.remaining, this.emptySongs)
+    this.restRemainingSongs = shuffle(this.restSongs)
     this.phase = 'arrange'
     this.arrangeEndsAt = Date.now() + ARRANGE_WINDOW_MS
     this.touch()
     this.sendRoom()
     this.scheduleArrangeStart(ARRANGE_WINDOW_MS)
+  }
+
+  arrangeLayout(session, message) {
+    const playerId = this.playerIdFor(session)
+    if (!playerId || this.phase !== 'playing') return
+    const seat = this.seats[playerId]
+    const cardKeys = Array.isArray(message.cardKeys) ? message.cardKeys : []
+    const hand = new Set(seat.handCardKeys)
+    const placed = cardKeys.filter((key) => typeof key === 'string')
+    if (
+      cardKeys.length !== MAX_HAND_SLOTS ||
+      placed.length !== hand.size ||
+      new Set(placed).size !== placed.length ||
+      placed.some((key) => !hand.has(key))
+    ) {
+      return
+    }
+    seat.layoutCardKeys = [...cardKeys]
+    this.touch()
+    this.sendRoom()
   }
 
   scheduleArrangeStart(delay) {
@@ -635,6 +694,10 @@ class OnlineRoom {
       this.endMatch()
       return
     }
+    this.restReadyStartAt = null
+    for (const playerId of ['A', 'B']) {
+      if (this.seats[playerId]) this.seats[playerId].restReady = false
+    }
     const choice = choices[Math.floor(Math.random() * choices.length)]
     if (choice.isEmpty) this.emptyRemainingSongs.splice(choice.index, 1)
     const token = crypto.randomBytes(20).toString('base64url')
@@ -652,6 +715,10 @@ class OnlineRoom {
       transferTimer: null,
       restEndsAtServerTime: null,
       restReason: null,
+      restToken: null,
+      restSong: null,
+      restAudioUrl: null,
+      restExpiresAt: null,
       expiresAt: startAt + ROUND_WINDOW_MS + REST_WINDOW_MS + 10_000,
     }
     this.touch()
@@ -660,7 +727,6 @@ class OnlineRoom {
       roundNo: this.roundNo,
       startAtServerTime: startAt,
       windowMs: ROUND_WINDOW_MS,
-      isEmpty: choice.isEmpty,
       audioUrl: `/api/online/room/${this.code}/audio/${token}`,
     })
     this.sendRoom()
@@ -701,6 +767,7 @@ class OnlineRoom {
     }
     current.restEndsAtServerTime = Date.now() + REST_WINDOW_MS
     current.restReason = 'wrong_claim'
+    this.prepareRestAudio(current)
     this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct, penalty: true, transferTo: to })
     this.scheduleTransferFallback(current)
     this.sendRoom()
@@ -762,6 +829,15 @@ class OnlineRoom {
     }
     giver.handCardKeys.splice(index, 1)
     recipient.handCardKeys.push(cardKey)
+    if (giver.layoutCardKeys.length === MAX_HAND_SLOTS) {
+      giver.layoutCardKeys = giver.layoutCardKeys.map((key) => (key === cardKey ? null : key))
+    }
+    if (recipient.layoutCardKeys.length === MAX_HAND_SLOTS) {
+      const nextLayout = [...recipient.layoutCardKeys]
+      const emptySlot = nextLayout.indexOf(null)
+      if (emptySlot >= 0) nextLayout[emptySlot] = cardKey
+      recipient.layoutCardKeys = nextLayout
+    }
     this.pendingTransfer = null
     if (this.current?.transferTimer) clearTimeout(this.current.transferTimer)
     if (this.current) this.current.transferTimer = null
@@ -811,6 +887,10 @@ class OnlineRoom {
     current.transferTimer = null
     this.pendingTransfer = null
     current.resolved = true
+    this.restReadyStartAt = null
+    for (const playerId of ['A', 'B']) {
+      if (this.seats[playerId]) this.seats[playerId].restReady = false
+    }
     this.current = current
     const targetOwner = !current.isEmpty && current.cardKey ? this.ownerOfCard(current.cardKey) : null
     if (removeCard && !current.isEmpty && current.cardKey) {
@@ -818,7 +898,12 @@ class OnlineRoom {
       for (const playerId of ['A', 'B']) {
         const seat = this.seats[playerId]
         const index = seat?.handCardKeys.indexOf(current.cardKey) ?? -1
-        if (index >= 0) seat.handCardKeys.splice(index, 1)
+        if (index >= 0) {
+          seat.handCardKeys.splice(index, 1)
+          if (seat.layoutCardKeys.length === MAX_HAND_SLOTS) {
+            seat.layoutCardKeys = seat.layoutCardKeys.map((key) => (key === current.cardKey ? null : key))
+          }
+        }
       }
     }
     if (winner) {
@@ -831,6 +916,7 @@ class OnlineRoom {
     }
     current.restEndsAtServerTime = current.restEndsAtServerTime || Date.now() + REST_WINDOW_MS
     current.restReason = current.restReason || (current.isEmpty ? 'empty' : 'round')
+    this.prepareRestAudio(current)
     if (winner && !current.isEmpty && removeCard && targetOwner && targetOwner !== winner) {
       this.pendingTransfer = {
         from: targetOwner,
@@ -846,7 +932,6 @@ class OnlineRoom {
       t: 'roundResult',
       roundNo: current.roundNo,
       cardKey: current.cardKey,
-      isEmpty: current.isEmpty,
       winner,
       reason,
       song: { displayName: current.song.displayName, fileName: current.song.fileName },
@@ -918,12 +1003,16 @@ class OnlineRoom {
     this.arrangeEndsAt = null
     this.emptySongs = []
     this.emptyRemainingSongs = []
+    this.restSongs = []
+    this.restRemainingSongs = []
     this.remaining = new Set(this.cards.map((card) => card.key))
+    this.restReadyStartAt = null
     this.scores = EMPTY_SCORES()
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (seat) {
         seat.ready = false
+        seat.restReady = false
         seat.score = 0
         seat.correctClaims = 0
         seat.poolCardKeys = []
@@ -931,18 +1020,41 @@ class OnlineRoom {
         seat.exchangeCardKeys = []
         seat.bannedCardKeys = []
         seat.handCardKeys = []
+        seat.layoutCardKeys = []
       }
     }
   }
 
+  prepareRestAudio(current) {
+    if (current.restToken || !current.restEndsAtServerTime) return
+    const restSong = this.takeRestSong()
+    if (!restSong) return
+    current.restSong = restSong
+    current.restToken = crypto.randomBytes(20).toString('base64url')
+    current.restAudioUrl = `/api/online/room/${this.code}/audio/${current.restToken}`
+    current.restExpiresAt = current.restEndsAtServerTime + REST_AUDIO_GRACE_MS
+  }
+
+  takeRestSong() {
+    if (!this.restRemainingSongs.length && this.restSongs.length) this.restRemainingSongs = shuffle(this.restSongs)
+    return this.restRemainingSongs.shift() || null
+  }
+
   assetForToken(token) {
     const current = this.current
-    if (!current || current.token !== token || current.expiresAt < Date.now()) return null
+    if (!current) return null
+    const asset =
+      current.token === token
+        ? { song: current.song, expiresAt: current.expiresAt }
+        : current.restToken === token
+          ? { song: current.restSong, expiresAt: current.restExpiresAt }
+          : null
+    if (!asset?.song || !asset.expiresAt || asset.expiresAt < Date.now()) return null
     return {
       packageId: this.packageId,
-      sourcePath: current.song.sourcePath,
-      fileName: current.song.fileName,
-      expiresAt: current.expiresAt,
+      sourcePath: asset.song.sourcePath,
+      fileName: asset.song.fileName,
+      expiresAt: asset.expiresAt,
     }
   }
 
@@ -989,8 +1101,8 @@ class OnlineRoom {
       you,
       phase: this.phase,
       players: {
-        A: this.playerView('A'),
-        B: this.playerView('B'),
+        A: this.playerView('A', you),
+        B: this.playerView('B', you),
       },
       cards: this.cards.map(({ key, number, imageName, workName }) => ({
         key,
@@ -1000,18 +1112,17 @@ class OnlineRoom {
         imageUrl: `/api/packages/${encodeURIComponent(this.packageId)}/card-image?cardKey=${encodeURIComponent(key)}`,
       })),
       remainingCardKeys: [...this.remaining],
-      emptyRemainingCount: this.emptyRemainingSongs.length,
       restEndsAtServerTime: this.current?.restEndsAtServerTime || null,
-      restReason: this.current?.restReason || null,
+      restAudioUrl: this.current?.restAudioUrl || null,
+      restReadyStartAtServerTime: this.restReadyStartAt,
       roundNo: this.roundNo,
-      totalRounds: HAND_SIZE * 2 + this.emptySongs.length,
       fairness: this.fairnessView(),
       draft: this.draftView(you),
       pendingTransfer: this.pendingTransfer,
     }
   }
 
-  playerView(playerId) {
+  playerView(playerId, viewerId) {
     const seat = this.seats[playerId]
     if (!seat) return null
     return {
@@ -1019,12 +1130,19 @@ class OnlineRoom {
       nickname: seat.nickname,
       connected: Boolean(seat.socket),
       ready: seat.ready,
+      restReady: seat.restReady,
       score: seat.score,
       correctClaims: seat.correctClaims,
       network: this.networkView(playerId),
       selectedCount: seat.selectedCardKeys.length,
       bannedCount: seat.bannedCardKeys.length,
-      handCardKeys: [...seat.handCardKeys],
+      // A local layout is private to its owner. Do not expose the owner's
+      // order in the opponent's room view.
+      handCardKeys: playerId === viewerId ? [...seat.handCardKeys] : [...seat.handCardKeys].sort(),
+      layoutCardKeys:
+        playerId !== viewerId && this.phase === 'playing' && seat.layoutCardKeys.length === MAX_HAND_SLOTS
+          ? [...seat.layoutCardKeys]
+          : null,
     }
   }
 
@@ -1141,13 +1259,33 @@ function buildEmptySongPool(catalogCards, fieldCardKeys) {
   for (const card of catalogCards || []) {
     if (fieldCardKeys.has(card.key)) continue
     for (const song of card.songs || []) {
-      const identity = [song.sourcePath, song.fileName, song.displayName].join('\u0000')
+      const identity = songIdentity(song)
       if (seen.has(identity)) continue
       seen.add(identity)
       candidates.push({ ...song })
     }
   }
   return shuffle(candidates).slice(0, EMPTY_SONG_COUNT)
+}
+
+function buildRestSongPool(catalogCards, fieldCardKeys, emptySongs) {
+  const excluded = new Set(emptySongs.map(songIdentity))
+  const seen = new Set()
+  const candidates = []
+  for (const card of catalogCards || []) {
+    if (fieldCardKeys.has(card.key)) continue
+    for (const song of card.songs || []) {
+      const identity = songIdentity(song)
+      if (excluded.has(identity) || seen.has(identity)) continue
+      seen.add(identity)
+      candidates.push({ ...song })
+    }
+  }
+  return candidates
+}
+
+function songIdentity(song) {
+  return [song.sourcePath, song.fileName, song.displayName].join('\u0000')
 }
 
 function normalizeCards(input) {

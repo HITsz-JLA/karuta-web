@@ -69,10 +69,16 @@ async function prepareMatch(manager, host, guest, hostSocket, guestSocket) {
 
   const arranged = latest(hostSocket, 'room').room
   assert.equal(arranged.phase, 'arrange')
-  assert.equal(arranged.totalRounds, 50 + room.emptySongs.length)
+  assert.equal('emptyRemainingCount' in arranged, false)
+  assert.equal('totalRounds' in arranged, false)
   assert.equal(arranged.players.A.handCardKeys.length, 25)
   assert.equal(arranged.players.B.handCardKeys.length, 25)
   assert.equal(new Set([...arranged.players.A.handCardKeys, ...arranged.players.B.handCardKeys]).size, 50)
+  assert.deepEqual(arranged.players.A.handCardKeys, room.seats.A.handCardKeys)
+  assert.deepEqual(arranged.players.B.handCardKeys, [...room.seats.B.handCardKeys].sort())
+  const guestArranged = latest(guestSocket, 'room').room
+  assert.deepEqual(guestArranged.players.B.handCardKeys, room.seats.B.handCardKeys)
+  assert.deepEqual(guestArranged.players.A.handCardKeys, [...room.seats.A.handCardKeys].sort())
   return room
 }
 
@@ -115,7 +121,19 @@ test('two players can create, join, ready, receive a round and claim a card', as
     assert.match(round.audioUrl, new RegExp(`/api/online/room/${joined.room.code}/audio/`))
     assert.equal('cardKey' in round, false)
     assert.equal('song' in round, false)
+    assert.equal('isEmpty' in round, false)
 
+    const hostLayout = [...room.seats.A.handCardKeys, ...Array(8).fill(null)]
+    await manager.handle(host, JSON.stringify({ t: 'arrangeLayout', cardKeys: hostLayout }))
+    assert.equal(latest(hostSocket, 'room').room.players.A.layoutCardKeys, null)
+    assert.deepEqual(latest(guestSocket, 'room').room.players.A.layoutCardKeys, hostLayout)
+
+    if (room.current.isEmpty) {
+      const cardKey = [...room.remaining][0]
+      room.current.isEmpty = false
+      room.current.cardKey = cardKey
+      room.current.song = room.cardByKey.get(cardKey).songs[0]
+    }
     const currentKey = room.current.cardKey
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: currentKey, clientAt: 1 }))
     assert.equal(latest(hostSocket, 'roundResult'), undefined)
@@ -260,6 +278,12 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     await new Promise((resolve) => setTimeout(resolve, 1_450))
 
     const round = latest(hostSocket, 'roundStart')
+    if (room.current.isEmpty) {
+      const cardKey = [...room.remaining][0]
+      room.current.isEmpty = false
+      room.current.cardKey = cardKey
+      room.current.song = room.cardByKey.get(cardKey).songs[0]
+    }
     const guestHandBefore = room.seats.B.handCardKeys.length
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: '', clientAt: 1 }))
     assert.equal(room.pendingTransfer.from, 'A')
@@ -283,7 +307,7 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
   }
 })
 
-test('empty-song rounds use 50 outside songs once and keep real cards on the board', async () => {
+test('empty-song rounds use 20 outside songs once and keep real cards on the board', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-empty-'))
   const manager = new OnlineRoomManager(temp)
   const originalRandom = Math.random
@@ -301,8 +325,8 @@ test('empty-song rounds use 50 outside songs once and keep real cards on the boa
     await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
-    assert.equal(room.emptySongs.length, 50)
-    assert.equal(room.emptyRemainingSongs.length, 50)
+    assert.equal(room.emptySongs.length, 20)
+    assert.equal(room.emptyRemainingSongs.length, 20)
 
     room.startPlaying()
     clearTimeout(room.nextRoundTimer)
@@ -311,8 +335,11 @@ test('empty-song rounds use 50 outside songs once and keep real cards on the boa
     room.nextRound()
     assert.equal(room.current.isEmpty, true)
     assert.equal(room.current.cardKey, '')
-    assert.equal(room.emptyRemainingSongs.length, 49)
-    assert.equal(latest(hostSocket, 'roundStart').isEmpty, true)
+    assert.equal(room.emptyRemainingSongs.length, 19)
+    const emptyRound = latest(hostSocket, 'roundStart')
+    assert.equal('isEmpty' in emptyRound, false)
+    assert.equal(emptyRound.windowMs, 10_000)
+    assert.equal(room.current.endsAt - room.current.startAt, emptyRound.windowMs)
     room.current.startAt = Date.now() - 100
     room.current.endsAt = Date.now() + 5_000
     const cardKey = room.seats.A.handCardKeys[0]
@@ -320,12 +347,63 @@ test('empty-song rounds use 50 outside songs once and keep real cards on the boa
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey, clientAt: 1 }))
     await new Promise((resolve) => setTimeout(resolve, 160))
     const result = latest(hostSocket, 'roundResult')
-    assert.equal(result.isEmpty, true)
+    assert.equal('isEmpty' in result, false)
     assert.equal(result.winner, 'A')
     assert.deepEqual(new Set(result.remainingCardKeys), before)
     assert.equal(room.seats.A.handCardKeys.length, 25)
+    assert.ok(room.current.restSong)
+    assert.ok(latest(hostSocket, 'room').room.restAudioUrl)
+    const fieldSongIds = new Set(room.cards.flatMap((card) => card.songs).map((song) => JSON.stringify(song)))
+    const emptySongIds = new Set(room.emptySongs.map((song) => JSON.stringify(song)))
+    assert.equal(fieldSongIds.has(JSON.stringify(room.current.restSong)), false)
+    assert.equal(emptySongIds.has(JSON.stringify(room.current.restSong)), false)
   } finally {
     Math.random = originalRandom
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('both players can ready during rest and start the next round in five seconds', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-rest-ready-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+    room.current.isEmpty = false
+    room.current.cardKey = room.seats.A.handCardKeys[0]
+    room.current.song = room.cardByKey.get(room.current.cardKey).songs[0]
+    room.current.startAt = Date.now() - 100
+    room.current.endsAt = Date.now() + 5_000
+    const round = latest(hostSocket, 'roundStart')
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: round.roundNo, cardKey: room.current.cardKey, clientAt: 1 }))
+    await new Promise((resolve) => setTimeout(resolve, 160))
+    assert.equal(room.current.resolved, true)
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(room.seats.A.restReady, true)
+    assert.equal(room.restReadyStartAt, null)
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(room.seats.B.restReady, true)
+    assert.ok(room.restReadyStartAt - Date.now() > 4_000)
+    assert.equal(latest(hostSocket, 'room').room.restReadyStartAtServerTime, room.restReadyStartAt)
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: false }))
+    assert.equal(room.restReadyStartAt, null)
+    assert.equal(room.seats.A.restReady, false)
+  } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
   }
