@@ -109,7 +109,16 @@ export class OnlineRoomManager {
   }
 
   connect(socket, ip = 'unknown') {
-    const session = { socket, ip, room: null, playerId: null, resumeToken: null, spectator: false, network: emptyNetwork() }
+    const session = {
+      socket,
+      ip,
+      room: null,
+      playerId: null,
+      resumeToken: null,
+      spectator: false,
+      replaced: false,
+      network: emptyNetwork(),
+    }
     this.sessions.set(socket, session)
     this.send(session, { t: 'welcome', resumed: false })
     return session
@@ -266,9 +275,28 @@ export class OnlineRoomManager {
       return
     }
     const seat = record.room.seats[record.playerId]
-    if (!seat || seat.socket) {
+    if (!seat) {
       this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
       return
+    }
+    if (seat.socket) {
+      const previousSession = seat.socket
+      // A browser refresh can open the replacement WebSocket before the old
+      // WebSocket's close event reaches Node. The resume token authenticates
+      // the same player, so let the replacement take the seat immediately.
+      // Detach the old session before closing it; otherwise its delayed close
+      // handler could clear the newly restored seat a moment later.
+      if (
+        previousSession !== session &&
+        previousSession.room === record.room &&
+        previousSession.playerId === record.playerId &&
+        !previousSession.spectator
+      ) {
+        this.replacePlayerSession(previousSession)
+      } else {
+        this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+        return
+      }
     }
     session.room = record.room
     session.playerId = record.playerId
@@ -284,6 +312,20 @@ export class OnlineRoomManager {
     record.room.networkChanged(true)
     record.room.broadcastPeer(record.playerId, true)
     record.room.sendCurrentState(session)
+  }
+
+  replacePlayerSession(session) {
+    this.sessions.delete(session.socket)
+    session.replaced = true
+    session.room = null
+    session.playerId = null
+    session.resumeToken = null
+    session.spectator = false
+    try {
+      if (session.socket?.readyState === 0 || session.socket?.readyState === 1) session.socket.close(4001, 'resumed elsewhere')
+    } catch {
+      // Closing an already closing browser socket is harmless.
+    }
   }
 
   async createRoom(session, message) {

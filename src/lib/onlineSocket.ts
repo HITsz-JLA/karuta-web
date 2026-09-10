@@ -82,8 +82,11 @@ export class OnlineSocket {
         this.reconnectAttempt = 0
         this.emitStatus(true)
         this.send({ t: 'hello', ...(this.resumeToken ? { resumeToken: this.resumeToken } : {}) })
-        if (this.spectatorRoomCode) this.send({ t: 'spectateRoom', code: this.spectatorRoomCode })
-        else if (!this.roomCode) this.send({ t: 'listRooms' })
+        // A player resume always takes precedence over a stale spectator
+        // target. This prevents a reconnect from sending both intents when a
+        // tab changed mode just as its WebSocket was replaced.
+        if (!this.resumeToken && this.spectatorRoomCode) this.send({ t: 'spectateRoom', code: this.spectatorRoomCode })
+        else if (!this.resumeToken && !this.roomCode) this.send({ t: 'listRooms' })
         this.startPing()
         if (!settled) {
           settled = true
@@ -154,9 +157,24 @@ export class OnlineSocket {
   }
 
   send(message: OnlineClientMessage): boolean {
-    if (this.socket?.readyState !== WebSocket.OPEN) return false
-    this.socket.send(JSON.stringify(message))
-    return true
+    const socket = this.socket
+    if (socket?.readyState !== WebSocket.OPEN) return false
+    try {
+      socket.send(JSON.stringify(message))
+      return true
+    } catch {
+      // readyState can change between the check and send during a network
+      // handover. Report a failed action and let onclose schedule recovery.
+      if (this.socket === socket) {
+        try {
+          socket.close()
+        } catch {
+          // The close event is best-effort; the next reconnect attempt is the
+          // authoritative recovery path.
+        }
+      }
+      return false
+    }
   }
 
   on(listener: MessageListener) {

@@ -9,9 +9,15 @@ import { OnlineRoomManager } from './onlineRooms.mjs'
 class FakeSocket {
   readyState = 1
   messages = []
+  closeCalls = 0
 
   send(value) {
     this.messages.push(JSON.parse(value))
+  }
+
+  close() {
+    this.closeCalls += 1
+    this.readyState = 3
   }
 }
 
@@ -338,6 +344,45 @@ test('resumed clients receive a full room snapshot after incremental updates', a
     assert.equal(restored.room.you, 'A')
     assert.equal(restored.room.cards.length, 60)
     assert.equal(restored.room.players.B.nickname, 'guest')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('a refresh can take over a still-open player socket without losing the seat', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-takeover-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const replacementSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    assert.ok(resumeToken)
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    // Keep the old socket registered to model a browser refresh racing the
+    // delayed close event. The new connection must still restore player A.
+    const replacement = manager.connect(replacementSocket)
+    await manager.handle(replacement, JSON.stringify({ t: 'hello', resumeToken }))
+
+    const room = [...manager.rooms.values()][0]
+    assert.equal(latest(replacementSocket, 'welcome').resumed, true)
+    assert.equal(latest(replacementSocket, 'room').room.you, 'A')
+    assert.equal(room.seats.A.socket, replacement)
+    assert.equal(room.seats.A.disconnectedAt, null)
+    assert.equal(host.room, null)
+    assert.equal(host.playerId, null)
+    assert.equal(hostSocket.closeCalls, 1)
+
+    // The old close callback must not disconnect the replacement session.
+    manager.disconnect(host)
+    assert.equal(room.seats.A.socket, replacement)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
