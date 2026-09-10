@@ -347,6 +347,10 @@ test('spectators receive a read-only full board and live claim events', async ()
     primeNetwork(manager, [host, guest])
     await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(latest(spectatorSocket, 'roomList').rooms.find((item) => item.code === created.room.code)?.status, 'preparing')
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: created.room.code }))
+    assert.equal(latest(spectatorSocket, 'error').code, 'spectate_unavailable')
+    assert.equal(spectator.room, null)
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
     clearTimeout(room.nextRoundTimer)
@@ -383,6 +387,108 @@ test('spectators receive a read-only full board and live claim events', async ()
     room.current.endsAt = Date.now() + 5_000
     await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey: beforeA[0], clientAt: 1 }))
     assert.equal(latest(spectatorSocket, 'claimFeedback').playerId, 'A')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('spectator snapshots stay private, replay active events, and are idempotent', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-spectator-state-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const spectatorSocket = new FakeSocket()
+    const lateSocket = new FakeSocket()
+    const resolvedSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    const spectator = manager.connect(spectatorSocket)
+    const lateSpectator = manager.connect(lateSocket)
+    const resolvedSpectator = manager.connect(resolvedSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    assert.equal(latest(spectatorSocket, 'roomList').rooms.find((item) => item.code === created.room.code)?.status, 'preparing')
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: created.room.code }))
+    assert.equal(latest(spectatorSocket, 'error').code, 'spectate_unavailable')
+    assert.equal(spectator.room, null)
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+
+    assert.equal(latest(spectatorSocket, 'roomList').rooms.find((item) => item.code === room.code)?.status, 'playing')
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+    const observed = latest(spectatorSocket, 'room').room
+    assert.equal(observed.you, null)
+    assert.equal(observed.spectator, true)
+    assert.deepEqual(observed.draft.poolCardKeys, [])
+    assert.deepEqual(observed.draft.selectedCardKeys, [])
+    assert.deepEqual(observed.draft.exchangeCardKeys, [])
+    assert.deepEqual(observed.draft.bannedCardKeys, [])
+    assert.equal(observed.players.A.layoutCardKeys.length, 33)
+    assert.equal(observed.players.B.layoutCardKeys.length, 33)
+
+    const errorsBeforeRepeat = spectatorSocket.messages.filter((message) => message.t === 'error').length
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+    assert.equal(spectatorSocket.messages.filter((message) => message.t === 'error').length, errorsBeforeRepeat)
+
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+    const cardKey = [...room.remaining][0]
+    room.current.isEmpty = false
+    room.current.cardKey = cardKey
+    room.current.song = room.cardByKey.get(cardKey).songs[0]
+    room.current.startAt = Date.now() - 100
+    room.current.endsAt = Date.now() + 5_000
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey, clientAt: 1 }))
+
+    await manager.handle(lateSpectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+    assert.equal(latest(lateSocket, 'claimFeedback').playerId, 'A')
+    assert.equal(latest(lateSocket, 'roundStart').roundNo, room.current.roundNo)
+
+    room.resolveRound('A', 'claimed')
+    await manager.handle(resolvedSpectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+    assert.equal(latest(resolvedSocket, 'roundResult').roundNo, room.current.roundNo)
+    assert.equal(latest(resolvedSocket, 'roundResult').winner, 'A')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('a spectator cannot be rebound through a player resume token', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-spectator-resume-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const spectatorSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    const spectator = manager.connect(spectatorSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+    manager.disconnect(host)
+
+    await manager.handle(spectator, JSON.stringify({ t: 'hello', resumeToken }))
+    assert.equal(latest(spectatorSocket, 'welcome').resumeRejected, true)
+    assert.equal(spectator.playerId, null)
+    assert.equal(room.seats.A.socket, null)
+    assert.equal(room.spectators.has(spectator), true)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })

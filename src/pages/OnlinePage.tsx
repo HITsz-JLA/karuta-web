@@ -283,6 +283,7 @@ export function OnlinePage() {
   const [battleAnimation, setBattleAnimation] = useState<BattleAnimation | null>(null)
   const [myClaim, setMyClaim] = useState<ClaimState | null>(null)
   const [opponentClaim, setOpponentClaim] = useState<ClaimState | null>(null)
+  const [claimsByPlayer, setClaimsByPlayer] = useState<Record<OnlinePlayerId, ClaimState | null>>({ A: null, B: null })
   const [roundRemaining, setRoundRemaining] = useState(0)
   const [restRemaining, setRestRemaining] = useState(0)
   const [arrangeReadyRemaining, setArrangeReadyRemaining] = useState(0)
@@ -322,7 +323,8 @@ export function OnlinePage() {
   const publishedLayoutRoundRef = useRef<number | null>(null)
   const phaseRef = useRef<OnlineRoomView['phase'] | null>(null)
   const roomCards = useMemo(() => room?.cards || [], [room?.cards])
-  const ownHandKeys = room?.players[room.you]?.handCardKeys || EMPTY_CARD_KEYS
+  const viewerId: OnlinePlayerId = room?.you || 'A'
+  const ownHandKeys = room?.players[viewerId]?.handCardKeys || EMPTY_CARD_KEYS
   const ownHandSignature = ownHandKeys.join('\u0000')
   const roundRef = useRef<OnlineRoundStart | null>(round)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
@@ -513,6 +515,7 @@ export function OnlinePage() {
           if (incoming.room.phase === 'lobby') {
             setRound(null)
             setMatchOver(null)
+            setClaimsByPlayer({ A: null, B: null })
             setDraftSelection(new Set())
             setDraftBans(new Set())
           } else if (incoming.room.phase === 'draft_select' && previousPhase !== 'draft_select') {
@@ -544,6 +547,7 @@ export function OnlinePage() {
           setMatchOver(null)
           setMyClaim(null)
           setOpponentClaim(null)
+          setClaimsByPlayer({ A: null, B: null })
           setRoundRemaining(incoming.windowMs)
           draggingKeyRef.current = null
           dragOverSlotRef.current = null
@@ -551,7 +555,9 @@ export function OnlinePage() {
           setDragOverSlot(null)
           break
         case 'claimFeedback':
-          if (roomRef.current && incoming.playerId === roomRef.current.you) {
+          const nextClaim = { cardKey: incoming.cardKey, correct: incoming.correct }
+          setClaimsByPlayer((previous) => ({ ...previous, [incoming.playerId]: nextClaim }))
+          if (roomRef.current?.you && incoming.playerId === roomRef.current.you) {
             setMyClaim({ cardKey: incoming.cardKey, correct: incoming.correct })
           } else {
             setOpponentClaim({ cardKey: incoming.cardKey, correct: incoming.correct })
@@ -566,6 +572,7 @@ export function OnlinePage() {
         case 'cardTransfer':
           setMyClaim(null)
           setOpponentClaim(null)
+          setClaimsByPlayer({ A: null, B: null })
           setMessage(
             incoming.to === roomRef.current?.you
               ? incoming.automatic
@@ -591,14 +598,16 @@ export function OnlinePage() {
           setRound(null)
           setMyClaim(null)
           setOpponentClaim(null)
+          setClaimsByPlayer({ A: null, B: null })
           break
         case 'matchOver':
           setMatchOver(incoming)
           setRound(null)
+          setClaimsByPlayer({ A: null, B: null })
           break
         case 'error':
           setMessage(incoming.message)
-          if (incoming.code === 'room_closed' || incoming.code === 'spectate_unavailable') {
+          if (incoming.code === 'room_closed' || incoming.code === 'spectate_unavailable' || incoming.code === 'spectators_full') {
             socket.clearResume()
             phaseRef.current = null
             roomRef.current = null
@@ -606,6 +615,7 @@ export function OnlinePage() {
             setRound(null)
             setLastResult(null)
             setMatchOver(null)
+            setClaimsByPlayer({ A: null, B: null })
             clearBattleAnimations()
             void socket.send({ t: 'listRooms' })
           }
@@ -614,7 +624,19 @@ export function OnlinePage() {
           break
       }
     })
-    const offStatus = socket.onStatus(setConnected)
+    const offStatus = socket.onStatus((nextConnected) => {
+      setConnected(nextConnected)
+      if (!nextConnected) {
+        // Incremental events may be missed while the socket is down. The next
+        // room snapshot/replay is authoritative, so do not keep showing an
+        // old round timer or claim marker during reconnect.
+        setRound(null)
+        setMyClaim(null)
+        setOpponentClaim(null)
+        setClaimsByPlayer({ A: null, B: null })
+        clearBattleAnimations()
+      }
+    })
     void socket
       .connect()
       .then(() => socket.send({ t: 'listRooms' }))
@@ -822,8 +844,8 @@ export function OnlinePage() {
       (card) => card.workName.toLowerCase().includes(query) || String(card.number).includes(query),
     )
   }, [eligibleCards, keyword])
-  const me = room ? room.players[room.you] : null
-  const opponent = room ? room.players[otherPlayer(room.you)] : null
+  const me = room ? room.players[viewerId] : null
+  const opponent = room ? room.players[otherPlayer(viewerId)] : null
   const opponentHandKeys = opponent?.handCardKeys || EMPTY_CARD_KEYS
   const orderedHandCards = useMemo<Array<OnlineCardView | null>>(() => {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
@@ -914,11 +936,12 @@ export function OnlinePage() {
     if (!code) return
     setBusy(true)
     setMessage(null)
+    const alreadyConnected = socket.connected
     socket.clearResume()
     socket.setSpectatorRoom(code)
     try {
       await socket.connect()
-      if (!socket.send({ t: 'spectateRoom', code })) throw new Error('在线连接已断开，请重试')
+      if (alreadyConnected && !socket.send({ t: 'spectateRoom', code })) throw new Error('在线连接已断开，请重试')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '进入观战失败')
     } finally {
@@ -939,6 +962,7 @@ export function OnlinePage() {
     clearBattleAnimations()
     setMyClaim(null)
     setOpponentClaim(null)
+    setClaimsByPlayer({ A: null, B: null })
     setDraftSelection(new Set())
     setDraftBans(new Set())
     setBoardSlots(Array(MAX_HAND_SLOTS).fill(null))
@@ -1443,15 +1467,15 @@ export function OnlinePage() {
                   key={item.code}
                   type="button"
                   className={`room-list-item${item.status === 'playing' ? ' spectateable' : ''}`}
-                  onClick={() => (item.status === 'playing' ? void spectateRoom(item.code) : setJoinCode(item.code))}
-                  disabled={busy}
-                  aria-label={item.status === 'playing' ? `观战 ${item.name}` : `填写房间码 ${item.name}`}
+                  onClick={() => (item.status === 'playing' ? void spectateRoom(item.code) : item.status === 'preparing' ? undefined : setJoinCode(item.code))}
+                  disabled={busy || item.status === 'preparing'}
+                  aria-label={item.status === 'playing' ? `观战 ${item.name}` : item.status === 'preparing' ? `准备中 ${item.name}` : `填写房间码 ${item.name}`}
                 >
                   <span>
                     <strong>{item.name}</strong>
-                    <span className="muted small">{item.deckName} · {item.players}/2 人 · {item.status === 'playing' ? '对局进行中，点击观战' : item.status === 'full' ? '等待加入' : '等待对手'}</span>
+                    <span className="muted small">{item.deckName} · {item.players}/2 人 · {item.status === 'playing' ? '对局进行中，点击观战' : item.status === 'preparing' ? '双方准备中' : item.status === 'full' ? '等待加入' : '等待对手'}</span>
                   </span>
-                  <span className={`room-code${item.status === 'playing' ? ' spectate-label' : ''}`}>{item.status === 'playing' ? '观战' : item.code}</span>
+                  <span className={`room-code${item.status === 'playing' ? ' spectate-label' : ''}`}>{item.status === 'playing' ? '观战' : item.status === 'preparing' ? '准备中' : item.code}</span>
                 </button>
               ))}
             </div>
@@ -1482,7 +1506,7 @@ export function OnlinePage() {
         room={room}
         round={round}
         lastResult={lastResult}
-        claims={{ A: room.you === 'A' ? myClaim : opponentClaim, B: room.you === 'B' ? myClaim : opponentClaim }}
+        claims={claimsByPlayer}
         battleAnimation={battleAnimation}
         connected={connected}
         restRemaining={restRemaining}
@@ -1711,6 +1735,7 @@ export function OnlinePage() {
             <HandArea
               title={`对手牌区 · ${opponentHandKeys.length}/${MAX_HAND_SLOTS}`}
               slotCards={opponentHandCards}
+              playerId={otherPlayer(viewerId)}
               claimable={canClaim}
               resultKey={lastResult?.cardKey || null}
               wrongKey={opponentClaim?.correct === false ? opponentClaim.cardKey : null}
@@ -1725,6 +1750,7 @@ export function OnlinePage() {
             <HandArea
               title={`我方牌区 · ${ownHandKeys.length}/${MAX_HAND_SLOTS}`}
               slotCards={orderedHandCards}
+              playerId={viewerId}
               mine
               canArrange={canArrange}
               pinMode={pinMode}
@@ -1752,9 +1778,9 @@ export function OnlinePage() {
             <section className="online-sidebar-card online-score-panel">
               <span className="muted small">比分</span>
               <div className="online-sidebar-scores">
-                <div><span>对手</span><strong>{scores[otherPlayer(room.you)]}</strong></div>
+                <div><span>对手</span><strong>{scores[otherPlayer(viewerId)]}</strong></div>
                 <span className="versus-mark">VS</span>
-                <div><strong>{scores[room.you]}</strong><span>我方</span></div>
+                <div><strong>{scores[viewerId]}</strong><span>我方</span></div>
               </div>
             </section>
             <section className={`online-sidebar-card online-phase-panel${isResting ? ' resting' : ''}${readyRemaining > 0 ? ' ready-countdown' : ''}`} role="status" aria-live="polite">
@@ -1824,7 +1850,7 @@ export function OnlinePage() {
         </div>
       </section>
 
-      {lastResult ? (
+      {lastResult && !matchOver ? (
         <div className="online-result-overlay" aria-live="polite">
             <section key={`result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
               <div className="row spread">
@@ -1984,6 +2010,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
   const bottomCards = useMemo(() => handCardsForSpectator(room, 'B'), [room])
   const phase = room.phase
   const isPlaying = phase === 'playing'
+  const showBoard = phase === 'arrange' || isPlaying || phase === 'over'
   const isResting = isPlaying && !round && restRemaining > 0 && !matchOver
   const seconds = phase === 'arrange' ? Math.ceil(arrangeRemaining / 1000) : round ? Math.ceil(roundRemaining / 1000) : isResting ? Math.ceil(restRemaining / 1000) : 0
   const stage = phase === 'arrange' ? '开局排牌' : round ? '听歌抢牌' : isResting ? '休息阶段' : phase === 'playing' ? '等待下一回合' : phase === 'over' || matchOver ? '对局结束' : '对局准备中'
@@ -2046,12 +2073,12 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
           </div>
         </div>
 
-        {phase !== 'playing' && phase !== 'over' ? (
+        {!showBoard ? (
           <div className="online-spectator-waiting" role="status">
             <strong>{stage}</strong>
-            <span>观战画面会在正式回合开始后显示双方的完整牌区。</span>
+            <span>观战画面会在对局开始后显示双方的完整牌区。</span>
             <div className="online-spectator-progress">
-              <span>A：{room.draft.selectedCardKeys.length}/30 已选 · {room.draft.bannedCardKeys.length}/5 BAN</span>
+              <span>A：{room.draft.selectedCount}/30 已选 · {room.draft.bannedCount}/5 BAN</span>
               <span>B：{room.draft.opponentSelectedCount}/30 已选 · {room.draft.opponentBannedCount}/5 BAN</span>
             </div>
           </div>
@@ -2061,6 +2088,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
               title={`${playerName(room, 'A')} · 上方牌区 · ${room.players.A?.handCardKeys.length || 0}/33`}
               slotCards={topCards}
               spectator
+              playerId="A"
               wrongKey={claims.A?.correct === false ? claims.A.cardKey : null}
               pickedKey={claims.A?.cardKey || null}
             />
@@ -2077,8 +2105,8 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
             <HandArea
               title={`${playerName(room, 'B')} · 下方牌区 · ${room.players.B?.handCardKeys.length || 0}/33`}
               slotCards={bottomCards}
-              mine
               spectator
+              playerId="B"
               wrongKey={claims.B?.correct === false ? claims.B.cardKey : null}
               pickedKey={claims.B?.cardKey || null}
             />
@@ -2092,7 +2120,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
             <span className="player-b-count">{playerName(room, 'B')} <b>{room.players.B?.handCardKeys.length || 0}</b></span>
             <span>场上实体牌 <b>{room.remainingCardKeys.length}</b></span>
           </section>
-          <NetworkFairness socket={socket} you="A" compact />
+          <NetworkFairness socket={socket} you={null} compact />
           <div className="online-audio-control">
             <button className="btn btn-secondary online-audio-button" type="button" onClick={onUnlockAudio}>{audioButtonLabel}</button>
           </div>
@@ -2100,7 +2128,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
       </section>
 
       {battleAnimation ? <BattleAnimationOverlay event={battleAnimation} room={room} /> : null}
-      {lastResult ? (
+      {lastResult && !matchOver ? (
         <div className="online-result-overlay" aria-live="polite">
           <section key={`spectator-result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
             <div className="row spread">
@@ -2286,6 +2314,7 @@ function DraftCardPicker({
 interface HandAreaProps {
   title: string
   slotCards: Array<OnlineCardView | null>
+  playerId?: OnlinePlayerId
   mine?: boolean
   spectator?: boolean
   canArrange?: boolean
@@ -2313,6 +2342,7 @@ interface HandAreaProps {
 const HandArea = memo(function HandArea({
   title,
   slotCards,
+  playerId,
   mine = false,
   spectator = false,
   canArrange = false,
@@ -2407,7 +2437,7 @@ const HandArea = memo(function HandArea({
     [canArrange, onPointerCancel],
   )
   return (
-    <section className={`hand-area${mine ? ' mine' : ''}${giving ? ' giving' : ''}${spectator ? ' spectator' : ''}`}>
+    <section className={`hand-area${mine ? ' mine' : ''}${playerId ? ` player-${playerId.toLowerCase()}` : ''}${giving ? ' giving' : ''}${spectator ? ' spectator' : ''}`}>
       <div className="row spread hand-area-heading">
         <strong>{title}</strong>
         <span className="muted small">{spectator ? '观战中 · 只读' : giving ? '点击自己的牌交给对手' : mine ? (canArrange ? (pinMode ? '点击固定牌位' : draggingKey ? '点击槽位放置选中的牌' : '点击牌再点击槽位，或拖动调整') : '你的牌区') : '点击卡面抢牌'}</span>
@@ -2537,6 +2567,17 @@ const NetworkFairness = memo(function NetworkFairness({ socket, you, compact = f
   if (!network) return null
   const { fairness, players } = network
   if (compact) {
+    if (!you) {
+      return (
+        <div className="network-fairness compact network-latency" role="status" aria-label="双方延迟">
+          <strong>双方延迟</strong>
+          <div className="network-metrics">
+            <span>A {formatNetworkMetric(players.A.rttMs)}</span>
+            <span>B {formatNetworkMetric(players.B.rttMs)}</span>
+          </div>
+        </div>
+      )
+    }
     const own = players[you]
     const opponent = players[otherPlayer(you)]
     return (

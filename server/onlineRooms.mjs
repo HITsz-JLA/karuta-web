@@ -22,6 +22,7 @@ const ROUND_WINDOW_MS = 10_000
 const ROUND_LEAD_MS = 750
 const ROOM_TTL_MS = 30 * 60 * 1000
 const RESUME_TTL_MS = 90 * 1000
+const MAX_SPECTATORS = 32
 const MAX_MESSAGE_BYTES = 1024 * 1024
 const AUDIO_EXTENSIONS = new Set(['.aac', '.aif', '.aiff', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
 
@@ -73,6 +74,23 @@ function shuffle(values) {
 
 function otherPlayer(playerId) {
   return playerId === 'A' ? 'B' : 'A'
+}
+
+function effectiveLayout(layout, handCardKeys) {
+  const hand = new Set(handCardKeys)
+  const used = new Set()
+  const result = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => {
+    const key = layout?.[index]
+    if (typeof key !== 'string' || !hand.has(key) || used.has(key)) return null
+    used.add(key)
+    return key
+  })
+  const unplaced = handCardKeys.filter((key) => !used.has(key))
+  let nextUnplaced = 0
+  for (let index = 0; index < result.length && nextUnplaced < unplaced.length; index += 1) {
+    if (result[index] === null) result[index] = unplaced[nextUnplaced++]
+  }
+  return result
 }
 
 export class OnlineRoomManager {
@@ -229,6 +247,13 @@ export class OnlineRoomManager {
   }
 
   hello(session, resumeToken) {
+    // A socket that already belongs to a room must never be rebound through a
+    // resume token. In particular, a spectator must not be able to present a
+    // player's token and become an input-capable session in the same room.
+    if (session.room || session.spectator) {
+      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+      return
+    }
     if (typeof resumeToken !== 'string' || !resumeToken) return
     const record = this.resumeIndex.get(resumeToken)
     if (!record || record.expiresAt < Date.now()) {
@@ -254,6 +279,7 @@ export class OnlineRoomManager {
     record.room.touch()
     record.room.networkChanged(true)
     record.room.broadcastPeer(record.playerId, true)
+    record.room.sendCurrentState(session)
   }
 
   async createRoom(session, message) {
@@ -332,30 +358,29 @@ export class OnlineRoomManager {
   }
 
   spectateRoom(session, message) {
+    const code = normalizeCode(message.code)
     if (session.room) {
+      if (session.spectator && session.room.code === code) {
+        session.room.sendSpectatorState(session)
+        return
+      }
       this.sendError(session, 'already_in_room', '你已经在一个房间中')
       return
     }
-    const code = normalizeCode(message.code)
     const room = this.rooms.get(code)
-    if (!room || room.phase === 'lobby' || room.phase === 'over') {
+    if (!room || !['arrange', 'playing'].includes(room.phase)) {
       this.sendError(session, 'spectate_unavailable', '该对局尚未开始或已经结束')
+      return
+    }
+    if (!room.canAddSpectator()) {
+      this.sendError(session, 'spectators_full', '观战人数已达到上限，请稍后再试')
       return
     }
     session.room = room
     session.spectator = true
     room.addSpectator(session)
-    room.sendSpectator(session)
+    room.sendSpectatorState(session)
     room.sendNetwork()
-    if (room.current && !room.current.resolved) {
-      this.send(session, {
-        t: 'roundStart',
-        roundNo: room.current.roundNo,
-        startAtServerTime: room.current.startAt,
-        windowMs: ROUND_WINDOW_MS,
-        audioUrl: `/api/online/room/${room.code}/audio/${room.current.token}`,
-      })
-    }
   }
 
   joinSeat(room, session, nickname, requestedSeat) {
@@ -535,6 +560,10 @@ class OnlineRoom {
     this.touch()
   }
 
+  canAddSpectator() {
+    return this.spectators.size < MAX_SPECTATORS
+  }
+
   removeSpectator(session) {
     this.spectators.delete(session)
     if (session.room === this) session.room = null
@@ -542,12 +571,20 @@ class OnlineRoom {
   }
 
   summary() {
+    const status =
+      this.phase === 'lobby'
+        ? this.playerCount >= 2
+          ? 'full'
+          : 'waiting'
+        : ['draft_select', 'draft_ban'].includes(this.phase)
+          ? 'preparing'
+          : 'playing'
     return {
       code: this.code,
       name: this.name,
       deckName: this.deckName,
       players: this.playerCount,
-      status: this.phase === 'lobby' ? (this.playerCount >= 2 ? 'full' : 'waiting') : 'playing',
+      status,
     }
   }
 
@@ -834,6 +871,9 @@ class OnlineRoom {
       startAt,
       endsAt: startAt + ROUND_WINDOW_MS,
       claims: new Map(),
+      lastClaim: null,
+      resultMessage: null,
+      resolved: false,
       transferTimer: null,
       restEndsAtServerTime: null,
       restReason: null,
@@ -876,7 +916,8 @@ class OnlineRoom {
     this.touch()
     if (correct) {
       current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })
-      this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct })
+      current.lastClaim = { t: 'claimFeedback', playerId, cardKey, correct }
+      this.broadcast(current.lastClaim)
       this.scheduleClaimSettlement()
       return
     }
@@ -890,12 +931,14 @@ class OnlineRoom {
       from: playerId,
       to,
       reason: 'wrong_claim',
+      cardKey: null,
       expiresAtServerTime: Date.now() + WRONG_TRANSFER_TIMEOUT_MS,
     }
     current.restEndsAtServerTime = Date.now() + REST_WINDOW_MS
     current.restReason = 'wrong_claim'
     this.prepareRestAudio(current)
-    this.broadcast({ t: 'claimFeedback', playerId, cardKey, correct, penalty: true, transferTo: to })
+    current.lastClaim = { t: 'claimFeedback', playerId, cardKey, correct, penalty: true, transferTo: to }
+    this.broadcast(current.lastClaim)
     this.scheduleTransferFallback(current)
     this.sendRoom()
   }
@@ -1063,6 +1106,7 @@ class OnlineRoom {
         from: targetOwner,
         to: winner,
         reason: 'opponent_card',
+        cardKey: current.cardKey,
         expiresAtServerTime: current.restEndsAtServerTime,
       }
       current.restReason = 'opponent_card'
@@ -1070,7 +1114,7 @@ class OnlineRoom {
     const emptyHandWinner = this.pendingTransfer ? null : this.emptyHandWinner()
     const nextAt = emptyHandWinner || !this.remaining.size ? null : current.restEndsAtServerTime
     this.touch()
-    this.broadcast({
+    const resultMessage = {
       t: 'roundResult',
       roundNo: current.roundNo,
       cardKey: current.cardKey,
@@ -1080,7 +1124,9 @@ class OnlineRoom {
       scores: { ...this.scores },
       remainingCardKeys: [...this.remaining],
       nextRoundAtServerTime: nextAt,
-    })
+    }
+    current.resultMessage = resultMessage
+    this.broadcast(resultMessage)
     this.sendRoom()
     if (emptyHandWinner) {
       this.endMatch(emptyHandWinner)
@@ -1243,7 +1289,41 @@ class OnlineRoom {
 
   sendSpectator(session) {
     if (!this.spectators.has(session)) return
-    this.manager.sendSerialized(session, this.serializedRoomView('A', true))
+    this.manager.sendSerialized(session, this.serializedRoomView(null, true))
+  }
+
+  sendSpectatorState(session) {
+    if (!this.spectators.has(session)) return
+    this.sendSpectator(session)
+    this.sendCurrentState(session)
+  }
+
+  sendCurrentState(session) {
+    const current = this.current
+    if (!current) return
+
+    // Replay only the small set of public events that defines the visible
+    // state of the current round. This lets a late spectator reconstruct the
+    // active claim markers or the just-finished settlement without exposing
+    // the hidden song/card identity.
+    for (const [playerId, claim] of current.claims) {
+      this.manager.send(session, { t: 'claimFeedback', playerId, cardKey: claim.cardKey, correct: true })
+    }
+    if (!current.resolved && current.lastClaim && !current.lastClaim.correct) {
+      this.manager.send(session, current.lastClaim)
+    }
+    if (current.resolved && current.resultMessage) {
+      this.manager.send(session, current.resultMessage)
+      return
+    }
+    if (current.resolved || this.pendingTransfer || Date.now() >= current.endsAt) return
+    this.manager.send(session, {
+      t: 'roundStart',
+      roundNo: current.roundNo,
+      startAtServerTime: current.startAt,
+      windowMs: ROUND_WINDOW_MS,
+      audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
+    })
   }
 
   networkChanged(forceRoom = false) {
@@ -1330,7 +1410,7 @@ class OnlineRoom {
       roundNo: this.roundNo,
       matchWinner: this.matchWinner,
       fairness: this.fairnessView(),
-      draft: this.draftView(you),
+      draft: this.draftView(you, spectator),
       pendingTransfer: this.pendingTransfer,
     }
   }
@@ -1354,15 +1434,16 @@ class OnlineRoom {
       // order in the opponent's room view.
       handCardKeys: spectator || playerId === viewerId ? [...seat.handCardKeys] : [...seat.handCardKeys].sort(),
       layoutCardKeys:
-        seat.layoutCardKeys.length === MAX_HAND_SLOTS && (spectator || (playerId !== viewerId && this.phase === 'playing'))
-          ? [...seat.layoutCardKeys]
+        spectator || (playerId !== viewerId && this.phase === 'playing')
+          ? effectiveLayout(seat.layoutCardKeys, seat.handCardKeys)
           : null,
     }
   }
 
-  draftView(playerId) {
-    const seat = this.seats[playerId]
-    const opponent = this.seats[otherPlayer(playerId)]
+  draftView(playerId, spectator = false) {
+    const ownPlayerId = playerId === 'A' || playerId === 'B' ? playerId : null
+    const seat = ownPlayerId ? this.seats[ownPlayerId] : null
+    const opponent = ownPlayerId ? this.seats[otherPlayer(ownPlayerId)] : this.seats.B
     const phase =
       this.phase === 'draft_select'
         ? 'select'
@@ -1373,14 +1454,16 @@ class OnlineRoom {
             : 'waiting'
     return {
       phase,
-      poolCardKeys: this.phase === 'draft_select' ? [...(seat?.poolCardKeys || [])] : [],
-      selectedCardKeys: [...(seat?.selectedCardKeys || [])],
-      exchangeCardKeys: this.phase === 'draft_ban' ? [...(seat?.exchangeCardKeys || [])] : [],
-      bannedCardKeys: [...(seat?.bannedCardKeys || [])],
+      poolCardKeys: !spectator && this.phase === 'draft_select' ? [...(seat?.poolCardKeys || [])] : [],
+      selectedCardKeys: !spectator ? [...(seat?.selectedCardKeys || [])] : [],
+      exchangeCardKeys: !spectator && this.phase === 'draft_ban' ? [...(seat?.exchangeCardKeys || [])] : [],
+      bannedCardKeys: !spectator ? [...(seat?.bannedCardKeys || [])] : [],
       selectionSize: DRAFT_SELECTION_SIZE,
       banSize: BAN_SIZE,
-      opponentSelectedCount: opponent?.selectedCardKeys.length || 0,
-      opponentBannedCount: opponent?.bannedCardKeys.length || 0,
+      selectedCount: spectator ? this.seats.A?.selectedCardKeys.length || 0 : seat?.selectedCardKeys.length || 0,
+      bannedCount: spectator ? this.seats.A?.bannedCardKeys.length || 0 : seat?.bannedCardKeys.length || 0,
+      opponentSelectedCount: spectator ? this.seats.B?.selectedCardKeys.length || 0 : opponent?.selectedCardKeys.length || 0,
+      opponentBannedCount: spectator ? this.seats.B?.bannedCardKeys.length || 0 : opponent?.bannedCardKeys.length || 0,
       arrangeEndsAtServerTime: this.phase === 'arrange' ? this.arrangeEndsAt : null,
     }
   }
