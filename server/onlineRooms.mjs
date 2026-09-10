@@ -927,6 +927,9 @@ class OnlineRoom {
     current.settlementTimer = null
     current.claims.clear()
     const to = otherPlayer(playerId)
+    this.scores[to] += 1
+    const opponentSeat = this.seats[to]
+    if (opponentSeat) opponentSeat.score = this.scores[to]
     this.pendingTransfer = {
       from: playerId,
       to,
