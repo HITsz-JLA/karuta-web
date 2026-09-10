@@ -2,8 +2,12 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promises as fs } from 'node:fs'
+import { createServer } from 'node:http'
 import express from 'express'
 import multer from 'multer'
+import { WebSocketServer } from 'ws'
+import { OnlineRoomManager } from './onlineRooms.mjs'
+import { readZipAssetRange } from './zipAsset.mjs'
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url))
 const projectDir = path.resolve(serverDir, '..')
@@ -35,7 +39,15 @@ const tempDir = path.join(dataDir, '.tmp')
 const metadataDir = path.join(dataDir, '.metadata')
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '0.0.0.0'
+const websocketHeartbeatMs = 1_000
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
+const onlineRooms = new OnlineRoomManager(dataDir, {
+  maxRooms: Number(process.env.ONLINE_MAX_ROOMS || 100),
+})
+// packageCatalog returns the same object while the archive's size and mtime
+// are unchanged. Cache only the derived wire body by that object identity, so
+// an invalidated catalog can never reuse a stale response.
+const catalogResponseCache = new WeakMap()
 
 async function getAdminPassword() {
   const configured = process.env.ADMIN_PASSWORD?.trim()
@@ -249,6 +261,43 @@ app.get('/api/packages', async (_request, response, next) => {
   }
 })
 
+app.get('/api/packages/:id/catalog', async (request, response, next) => {
+  try {
+    const catalog = await onlineRooms.getPackageCatalog(request.params.id)
+    if (!catalog) {
+      response.status(404).json({ message: '在线 MUCA 牌组不存在' })
+      return
+    }
+    const cached = catalogResponseCache.get(catalog) || buildCatalogResponse(catalog)
+    response.type('json')
+    response.setHeader('Content-Length', String(cached.byteLength))
+    response.send(cached.body)
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/packages/:id/card-image', async (request, response, next) => {
+  try {
+    const cardKey = typeof request.query.cardKey === 'string' ? request.query.cardKey : ''
+    const image = await onlineRooms.getPackageCardImage(request.params.id, cardKey)
+    if (!image) {
+      response.status(404).json({ message: '歌牌卡面不存在' })
+      return
+    }
+    response.setHeader('Content-Type', imageMime(image.name))
+    response.setHeader('Cache-Control', 'public, max-age=86400, immutable')
+    response.setHeader('Content-Length', String(image.data.byteLength))
+    response.send(image.data)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      response.status(404).json({ message: '歌牌卡面资源不存在' })
+      return
+    }
+    next(error)
+  }
+})
+
 app.get('/api/packages/:id/download', async (request, response, next) => {
   try {
     const packagePath = packagePathFromId(request.params.id)
@@ -321,6 +370,43 @@ app.post('/api/packages', requireAdmin, upload.single('file'), async (request, r
   }
 })
 
+app.get('/api/online/room/:code/audio/:token', async (request, response, next) => {
+  try {
+    const asset = await onlineRooms.getAudio(request.params.code, request.params.token)
+    if (!asset) {
+      response.status(404).json({ message: '音频凭证无效或已过期' })
+      return
+    }
+    const media = await readZipAssetRange(asset.packagePath, asset.sourcePath, asset.fileName, request.headers.range)
+    const range = media.range
+    const totalBytes = media.totalBytes
+    response.setHeader('Content-Type', audioMime(media.name || asset.fileName))
+    response.setHeader('Cache-Control', 'private, no-store')
+    response.setHeader('Accept-Ranges', 'bytes')
+    if (range?.invalid) {
+      response.status(416)
+      response.setHeader('Content-Range', `bytes */${totalBytes}`)
+      response.end()
+      return
+    }
+    if (range) {
+      response.status(206)
+      response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${totalBytes}`)
+      response.setHeader('Content-Length', String(media.data.byteLength))
+      response.send(media.data)
+      return
+    }
+    response.setHeader('Content-Length', String(totalBytes))
+    response.send(media.data)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      response.status(404).json({ message: '音频资源不存在' })
+      return
+    }
+    next(error)
+  }
+})
+
 app.use('/api', (_request, response) => {
   response.status(404).json({ message: 'API 不存在' })
 })
@@ -352,9 +438,127 @@ app.use((error, _request, response, _next) => {
   response.status(500).json({ message: '服务器处理失败' })
 })
 
-app.listen(port, host, () => {
+function audioMime(fileName) {
+  const ext = path.extname(fileName || '').toLowerCase()
+  if (ext === '.m4a' || ext === '.mp4') return 'audio/mp4'
+  if (ext === '.ogg' || ext === '.oga') return 'audio/ogg'
+  if (ext === '.wav') return 'audio/wav'
+  if (ext === '.flac') return 'audio/flac'
+  return 'audio/mpeg'
+}
+
+function imageMime(fileName) {
+  const ext = path.extname(fileName || '').toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  if (ext === '.bmp') return 'image/bmp'
+  return 'image/jpeg'
+}
+
+function buildCatalogResponse(catalog) {
+  const body = JSON.stringify({
+    catalog: {
+      packageId: catalog.packageId,
+      deckName: catalog.deckName,
+      cards: catalog.cards.map(({ key, number, imageName, workName, songs }) => ({
+        key,
+        number,
+        imageName,
+        workName,
+        songCount: songs.length,
+      })),
+    },
+  })
+  const cached = { body, byteLength: Buffer.byteLength(body) }
+  catalogResponseCache.set(catalog, cached)
+  return cached
+}
+
+const httpServer = createServer(app)
+const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+
+function pingWebsocket(socket) {
+  if (socket.readyState !== 1) return
+  socket.isAlive = false
+  socket.karutaPingAt = Date.now()
+  try {
+    socket.ping()
+  } catch {
+    socket.terminate()
+  }
+}
+
+httpServer.on('upgrade', (request, socket, head) => {
+  let url
+  try {
+    url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
+  } catch {
+    socket.destroy()
+    return
+  }
+  if (url.pathname !== '/ws') {
+    socket.destroy()
+    return
+  }
+  websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+    websocketServer.emit('connection', websocket, request)
+  })
+})
+
+websocketServer.on('connection', (socket, request) => {
+  const session = onlineRooms.connect(socket, request.socket.remoteAddress || 'unknown')
+  let disconnected = false
+  socket.isAlive = true
+  socket.karutaPingAt = 0
+  socket.karutaMissedPongs = 0
+  const disconnect = () => {
+    if (disconnected) return
+    disconnected = true
+    onlineRooms.disconnect(session)
+  }
+  socket.on('message', (message) => {
+    void onlineRooms.handle(session, message)
+  })
+  socket.on('pong', () => {
+    socket.isAlive = true
+    socket.karutaMissedPongs = 0
+    const sentAt = socket.karutaPingAt
+    socket.karutaPingAt = 0
+    if (sentAt) onlineRooms.recordPong(session, Date.now() - sentAt)
+  })
+  socket.on('close', disconnect)
+  socket.on('error', disconnect)
+  pingWebsocket(socket)
+})
+
+const websocketHeartbeatTimer = setInterval(() => {
+  for (const socket of websocketServer.clients) {
+    if (socket.isAlive === false) {
+      socket.karutaMissedPongs = (socket.karutaMissedPongs || 0) + 1
+      if (socket.karutaMissedPongs >= 3) {
+        socket.terminate()
+      }
+      continue
+    }
+    socket.karutaMissedPongs = 0
+    pingWebsocket(socket)
+  }
+}, websocketHeartbeatMs)
+websocketHeartbeatTimer.unref?.()
+
+httpServer.listen(port, host, () => {
   console.log(`Karuta Web server listening on http://${host}:${port}`)
   if (!process.env.ADMIN_PASSWORD) {
     console.log('管理员密码已保存到受保护文件，不会写入服务日志')
   }
 })
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    onlineRooms.dispose()
+    clearInterval(websocketHeartbeatTimer)
+    websocketServer.close()
+    httpServer.close(() => process.exit(0))
+  })
+}

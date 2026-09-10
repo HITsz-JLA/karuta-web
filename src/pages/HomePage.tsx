@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
+import { HomeNowPlaying } from '../components/HomeNowPlaying'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
 import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
-import { downloadServerPackage, listServerPackages, type ServerPackage } from '../lib/serverPackages'
+import {
+  CURATED_MUCA_PACKAGES,
+  downloadServerPackage,
+  isCuratedMucaPackage,
+  listServerPackages,
+  type ServerPackage,
+} from '../lib/serverPackages'
 import type { FailureMode } from '../types/models'
 
 function formatBytes(bytes: number) {
@@ -34,7 +41,8 @@ export function HomePage() {
   const [packagesLoading, setPackagesLoading] = useState(true)
 
   useEffect(() => {
-    if (!selectedId && decks[0]) setSelectedId(decks[0].id)
+    const preferredDeck = decks.find((item) => isCuratedMucaPackage(item.sourcePackageId)) || decks[0]
+    if (!selectedId && preferredDeck) setSelectedId(preferredDeck.id)
   }, [decks, selectedId])
 
   useEffect(() => {
@@ -47,6 +55,20 @@ export function HomePage() {
 
   const previewCard = deck?.cards[previewIndex] || null
   const previewUrl = useObjectUrl(previewCard?.imageBlobKey)
+
+  const curatedServerPackages = useMemo(
+    () =>
+      CURATED_MUCA_PACKAGES.map((meta) => ({
+        meta,
+        serverPackage: serverPackages.find((item) => item.id === meta.id),
+      })).filter(
+        (item): item is {
+          meta: (typeof CURATED_MUCA_PACKAGES)[number]
+          serverPackage: ServerPackage
+        } => Boolean(item.serverPackage),
+      ),
+    [serverPackages],
+  )
 
   const songCount = useMemo(
     () => deck?.cards.reduce((sum, card) => sum + card.songs.length, 0) || 0,
@@ -88,9 +110,11 @@ export function HomePage() {
         (progress) => setImportProgress(progress),
         serverPackage.mode,
       )
+      const synced = { ...imported, sourcePackageId: serverPackage.id }
+      await saveDeck(synced)
       await refresh()
-      setSelectedId(imported.id)
-      setMessage(`已导入：${imported.name}`)
+      setSelectedId(synced.id)
+      setMessage(`已导入：${synced.name}`)
     } catch (error) {
       setMessage(readableImportError(error))
     } finally {
@@ -138,10 +162,38 @@ export function HomePage() {
   }
 
   return (
-    <>
-      <section className="hero">
-        <h1>点歌对战</h1>
-        <p>歌牌数据包存放在服务器本地，普通用户只能读取；管理员登录后可上传 ZIP。</p>
+    <div className="home-page">
+      <section className="home-stage-hero">
+        <div className="home-hero-copy">
+          <span className="home-stage-kicker">KARUTA LIVE · MUSIC SELECT</span>
+          <h1>歌牌对战</h1>
+          <p>把本地曲库变成一座闪耀的节奏舞台：先选曲，再和朋友进行 1v1 抢牌。</p>
+          <div className="row home-hero-actions">
+            <button className="btn btn-primary btn-lg" type="button" onClick={startGame}>
+              开始歌牌对战
+            </button>
+            <Link className="btn btn-secondary btn-lg" to="/online">
+              进入在线 1v1
+            </Link>
+          </div>
+        </div>
+        <div className="home-stage-visual" aria-label="首页歌曲试听">
+          <div className="home-stage-aura home-stage-aura-one" />
+          <div className="home-stage-aura home-stage-aura-two" />
+          <div className="home-beat-ring home-beat-ring-one" />
+          <div className="home-beat-ring home-beat-ring-two" />
+          <HomeNowPlaying
+            deck={deck}
+            selectedCard={previewCard}
+            volume={settings.volume}
+            onVolumeChange={(volume) => void update({ volume })}
+          />
+          <div className={`home-equalizer${deck?.cards.some((card) => card.songs.length) ? '' : ' paused'}`}>
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((bar) => (
+              <i key={bar} style={{ animationDelay: `${bar * 70}ms` }} />
+            ))}
+          </div>
+        </div>
       </section>
 
       <div className="grid-home">
@@ -152,7 +204,7 @@ export function HomePage() {
               刷新
             </button>
           </div>
-          <p className="muted small">从服务器选择数据包并加载到当前浏览器后开始对战。</p>
+          <p className="muted small">在线 1v1 直接使用服务器牌组；下面的导入操作只用于本地练习或编辑。</p>
 
           <div className="row">
             <button className="btn btn-secondary" type="button" onClick={() => void refreshServerPackages()} disabled={packagesLoading || busy}>
@@ -166,38 +218,47 @@ export function HomePage() {
                 编辑本地副本
               </Link>
             ) : null}
+            <Link className="btn btn-primary" to="/online">
+              在线 1v1 歌牌对战
+            </Link>
           </div>
 
           <section className="panel stack" style={{ boxShadow: 'none' }}>
             <div className="row spread">
-              <strong>服务器数据包</strong>
-              <span className="muted small">普通用户只读</span>
+              <strong>四套 MUCA 牌组</strong>
+              <span className="muted small">在线使用服务器卡面</span>
             </div>
             {packagesLoading ? <div className="empty-state">正在读取服务器数据包…</div> : null}
-            {!packagesLoading && !serverPackages.length ? (
-              <div className="empty-state">服务器暂时没有数据包</div>
+            {!packagesLoading && !curatedServerPackages.length ? (
+              <div className="empty-state">服务器暂时没有可用的 MUCA 牌组</div>
             ) : null}
-            {!packagesLoading
-              ? serverPackages.map((serverPackage) => (
-                  <div className="row spread" key={serverPackage.id}>
-                    <div>
-                      <strong>{serverPackage.name}</strong>
-                      <div className="muted small">
-                        {formatBytes(serverPackage.size)} · {serverPackage.mode === 'full' ? '完整包' : '精简包'} ·{' '}
-                        {new Date(serverPackage.updatedAt).toLocaleString()}
+            {!packagesLoading ? (
+              <div className="muca-package-grid">
+                {curatedServerPackages.map(({ meta, serverPackage }) => {
+                  const loaded = decks.some((item) => item.sourcePackageId === serverPackage.id)
+                  return (
+                    <article className={`muca-package-card ${meta.tone}`} key={serverPackage.id}>
+                      <div className="muca-package-badge">{meta.code}</div>
+                      <div className="muca-package-info">
+                        <strong>{meta.name}</strong>
+                        <span>{serverPackage.name}</span>
+                        <small>
+                          {formatBytes(serverPackage.size)} · {serverPackage.mode === 'full' ? '完整包' : '精简包'}
+                        </small>
                       </div>
-                    </div>
-                    <button
-                      className="btn btn-primary"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void loadServerPackage(serverPackage)}
-                    >
-                      加载
-                    </button>
-                  </div>
-                ))
-              : null}
+                      <button
+                        className="btn btn-primary"
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void loadServerPackage(serverPackage)}
+                      >
+                        {loaded ? '重新导入本地' : '导入本地'}
+                      </button>
+                    </article>
+                  )
+                })}
+              </div>
+            ) : null}
           </section>
 
           {busy && importProgressLabel ? (
@@ -287,7 +348,7 @@ export function HomePage() {
               </div>
             </div>
             <button className="btn btn-primary btn-lg btn-block" type="button" onClick={startGame}>
-              开始
+              开始本地歌牌对战
             </button>
           </div>
         </section>
@@ -339,6 +400,6 @@ export function HomePage() {
       </div>
 
       {message ? <div className="toast">{message}</div> : null}
-    </>
+    </div>
   )
 }

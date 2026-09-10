@@ -180,6 +180,7 @@ export async function importDeckZip(
           fileName: baseName(fileName) || baseName(songPath || fileName),
           displayName,
           blobKey,
+          ...(songPath ? { sourcePath: songPath } : {}),
           ...(fullBlobKey ? { fullBlobKey } : {}),
         }
         return song

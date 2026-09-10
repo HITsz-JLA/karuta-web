@@ -9,7 +9,10 @@ export function Layout() {
         </Link>
         <nav className="nav-actions">
           <Link className="btn btn-ghost" to="/">
-            对局
+            歌牌对战
+          </Link>
+          <Link className="btn btn-ghost" to="/online">
+            在线 1v1
           </Link>
           <Link className="btn btn-ghost" to="/editor">
             数据集

@@ -9,6 +9,7 @@
     "start": "node server/index.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test": "node --test server/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -19,7 +20,8 @@
     "papaparse": "^5.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "react-router-dom": "^7.18.3"
+    "react-router-dom": "^7.18.3",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

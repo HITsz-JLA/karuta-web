@@ -19,14 +19,16 @@ type RawCsvRow = Record<string, unknown>
 export function cardsToCsv(cards: CardEntry[]): string {
   const rows = cards.map((card) => ({
     image_name: card.imageName,
+    image_path: card.imagePath || '',
     work_name: card.workName,
     songs: card.songs.map((song) => song.fileName).join('|'),
     song_display_names: card.songs.map((song) => song.displayName).join('|'),
+    song_paths: card.songs.map((song) => song.sourcePath || '').join('|'),
     card_number: String(card.number),
   }))
 
   return Papa.unparse({
-    fields: ['image_name', 'work_name', 'songs', 'song_display_names', 'card_number'],
+    fields: ['image_name', 'image_path', 'work_name', 'songs', 'song_display_names', 'song_paths', 'card_number'],
     data: rows,
   })
 }
@@ -58,9 +60,11 @@ export function parseCsv(text: string): CsvWorkRow[] {
   return rows
     .map((row) => ({
       image_name: readField(row, 'image_name'),
+      image_path: readField(row, 'image_path') || undefined,
       work_name: readField(row, 'work_name'),
       songs: readField(row, 'songs'),
       song_display_names: readField(row, 'song_display_names'),
+      song_paths: splitPipe(readField(row, 'song_paths')),
       card_number: readField(row, 'card_number') || undefined,
     }))
     .filter((row) => row.image_name || row.work_name || row.songs)
@@ -89,6 +93,7 @@ export function csvRowsToCards(
       number: Number.isFinite(parsedNumber) && parsedNumber > 0 ? parsedNumber : index + 1,
       imageName: row.image_name || `card_${index + 1}.jpg`,
       imageBlobKey: resolveImageKey(row.image_name || '', row.image_path),
+      ...(row.image_path ? { imagePath: row.image_path } : {}),
       workName: row.work_name || `作品 ${index + 1}`,
       songs,
     }

@@ -14,6 +14,43 @@ export interface ServerPackageDownloadProgress {
   total: number
 }
 
+export interface ServerPackageCatalogCard {
+  key: string
+  number: number
+  imageName: string
+  workName: string
+  songCount: number
+}
+
+export interface ServerPackageCatalog {
+  packageId: string
+  deckName: string
+  cards: ServerPackageCatalogCard[]
+}
+
+/** The four curated local MUCA packs exposed to ordinary players. */
+export const CURATED_MUCA_PACKAGES = [
+  { id: 'jla-muca-pjsk-lite.zip', code: 'PJSK', name: 'Project SEKAI', tone: 'pjsk' },
+  { id: 'jla-muca-bangdream-lite.zip', code: 'BD', name: 'BanG Dream!', tone: 'bangdream' },
+  { id: 'jla-muca-galgame-lite.zip', code: 'GAL', name: 'Galgame', tone: 'galgame' },
+  { id: 'jla-muca-anime-lite.zip', code: 'ANI', name: 'Anime', tone: 'anime' },
+] as const
+
+export function isCuratedMucaPackage(packageId: string | undefined): boolean {
+  return Boolean(packageId && CURATED_MUCA_PACKAGES.some((item) => item.id === packageId))
+}
+
+export async function getServerPackageCatalog(packageId: string): Promise<ServerPackageCatalog> {
+  const result = await requestJson<{ catalog: ServerPackageCatalog }>(
+    `/api/packages/${encodeURIComponent(packageId)}/catalog`,
+  )
+  return result.catalog
+}
+
+export function serverCardImageUrl(packageId: string, cardKey: string): string {
+  return `/api/packages/${encodeURIComponent(packageId)}/card-image?cardKey=${encodeURIComponent(cardKey)}`
+}
+
 export type ServerPackageDownloadProgressHandler = (progress: ServerPackageDownloadProgress) => void
 
 const DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024

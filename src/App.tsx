@@ -5,6 +5,7 @@ import { GamePage } from './pages/GamePage'
 import { HomePage } from './pages/HomePage'
 import { AdminPage } from './pages/AdminPage'
 import { SelectPage } from './pages/SelectPage'
+import { OnlinePage } from './pages/OnlinePage'
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
         <Route path="editor/:deckId" element={<EditorPage />} />
         <Route path="select/:deckId" element={<SelectPage />} />
         <Route path="game/:deckId" element={<GamePage />} />
+        <Route path="online" element={<OnlinePage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

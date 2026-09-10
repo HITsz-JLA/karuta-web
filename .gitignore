@@ -16,6 +16,7 @@ data-packages/*.zip
 data-packages/.admin-password
 data-packages/.tmp/
 data-packages/.metadata/
+.playwright-cli/
 
 # Editor directories and files
 .vscode/*

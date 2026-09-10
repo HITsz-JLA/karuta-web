@@ -97,6 +97,7 @@ export async function listDeckMeta(): Promise<DeckMeta[]> {
       updatedAt: deck.updatedAt,
       cardCount: deck.cards.length,
       songCount: deck.cards.reduce((sum, card) => sum + card.songs.length, 0),
+      ...(deck.sourcePackageId ? { sourcePackageId: deck.sourcePackageId } : {}),
     }))
     .reverse()
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { CardTile } from '../components/CardTile'
 import { useDeck, useSettings } from '../hooks/useDecks'
@@ -9,6 +9,100 @@ function parseNumberInput(raw: string): number[] {
     .split(/[\s,，、;；]+/)
     .map((part) => Number.parseInt(part.trim(), 10))
     .filter((value) => Number.isFinite(value) && value > 0)
+}
+
+function pickRandomCards(cards: CardEntry[], count: number): CardEntry[] {
+  const sampleSize = Math.min(Math.max(0, count), cards.length)
+  if (sampleSize === 0) return []
+
+  // Reservoir sampling keeps random selection linear without sorting a large deck.
+  const sample = cards.slice(0, sampleSize)
+  for (let index = sampleSize; index < cards.length; index += 1) {
+    const slot = Math.floor(Math.random() * (index + 1))
+    if (slot < sampleSize) sample[slot] = cards[index]
+  }
+  return sample
+}
+
+interface LocalCardGridProps {
+  cards: CardEntry[]
+  selectedIds: Set<string>
+  onToggle: (cardId: string) => void
+}
+
+/** Keeps the complete local deck scrollable while mounting only nearby rows. */
+function LocalCardGrid({ cards, selectedIds, onToggle }: LocalCardGridProps) {
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const scrollTopRef = useRef(0)
+  const scrollFrameRef = useRef<number | null>(null)
+  const [viewport, setViewport] = useState({ width: 0, height: 520 })
+  const [scrollTop, setScrollTop] = useState(0)
+
+  useEffect(() => {
+    const element = viewportRef.current
+    if (!element) return
+    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight || 520 })
+    update()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (scrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollFrameRef.current)
+      scrollFrameRef.current = null
+    }
+    scrollTopRef.current = 0
+    if (viewportRef.current && viewportRef.current.scrollTop !== 0) {
+      viewportRef.current.scrollTop = 0
+    }
+    setScrollTop((previous) => (previous === 0 ? previous : 0))
+  }, [cards])
+
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    scrollTopRef.current = event.currentTarget.scrollTop
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      setScrollTop(scrollTopRef.current)
+    })
+  }, [])
+
+  const columns = Math.max(1, Math.floor((viewport.width + 12) / (viewport.width >= 700 ? 172 : 144)))
+  const cardWidth = Math.max(120, (viewport.width - (columns - 1) * 12 - 6) / columns)
+  const rowHeight = Math.ceil(cardWidth * 1.45 + 58)
+  const rowCount = Math.ceil(cards.length / columns)
+  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
+  const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
+  const startIndex = firstRow * columns
+  const renderedCards = cards.slice(startIndex, lastRow * columns)
+
+  return (
+    <div className="local-select-viewport" ref={viewportRef} onScroll={handleScroll} aria-label={`本地牌组，共 ${cards.length} 张卡面`}>
+      <div className="local-select-canvas" style={{ height: `${rowCount * rowHeight}px` }}>
+        <div
+          className="local-select-window"
+          style={{
+            top: `${firstRow * rowHeight}px`,
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+            gridAutoRows: `${rowHeight}px`,
+          }}
+        >
+          {renderedCards.map((card) => (
+            <CardTile key={card.id} card={card} selected={selectedIds.has(card.id)} onToggle={onToggle} />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function SelectPage() {
@@ -22,6 +116,7 @@ export function SelectPage() {
   const [numberInput, setNumberInput] = useState('')
   const [emptyMode, setEmptyMode] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const deferredKeyword = useDeferredValue(keyword)
 
   const cardLimit = Math.max(1, Math.min(settings.cardLimit, deck?.cards.length || settings.cardLimit))
 
@@ -32,34 +127,50 @@ export function SelectPage() {
     setInitialized(true)
   }, [deck, cardLimit, initialized])
 
+  const searchableCards = useMemo(() => {
+    if (!deck) return []
+    return deck.cards.map((card) => ({
+      card,
+      workName: card.workName.toLowerCase(),
+      number: String(card.number),
+      hashNumber: `#${card.number}`,
+    }))
+  }, [deck])
+
+  const cardsByNumber = useMemo(() => {
+    const result = new Map<number, CardEntry[]>()
+    for (const card of deck?.cards || []) {
+      const matches = result.get(card.number)
+      if (matches) matches.push(card)
+      else result.set(card.number, [card])
+    }
+    return result
+  }, [deck])
+
   const visibleCards = useMemo(() => {
     if (!deck) return []
-    const q = keyword.trim().toLowerCase()
-    return deck.cards.filter((card) => {
-      if (!q) return true
-      return (
-        card.workName.toLowerCase().includes(q) ||
-        String(card.number).includes(q) ||
-        `#${card.number}`.includes(q)
-      )
-    })
-  }, [deck, keyword])
+    const q = deferredKeyword.trim().toLowerCase()
+    if (!q) return deck.cards
+    return searchableCards
+      .filter(({ workName, number, hashNumber }) => workName.includes(q) || number.includes(q) || hashNumber.includes(q))
+      .map(({ card }) => card)
+  }, [deck, deferredKeyword, searchableCards])
 
-  function toggleCard(card: CardEntry) {
+  const toggleCard = useCallback((cardId: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
-      if (next.has(card.id)) {
-        next.delete(card.id)
+      if (next.has(cardId)) {
+        next.delete(cardId)
       } else {
         if (next.size >= cardLimit) {
           setMessage(`最多只能选择 ${cardLimit} 张卡牌。`)
           return prev
         }
-        next.add(card.id)
+        next.add(cardId)
       }
       return next
     })
-  }
+  }, [cardLimit])
 
   function applyNumberEntry(mode: 'add' | 'replace') {
     if (!deck) return
@@ -73,7 +184,7 @@ export function SelectPage() {
     const missing: number[] = []
 
     for (const num of numbers) {
-      const matches = deck.cards.filter((card) => card.number === num)
+      const matches = cardsByNumber.get(num) || []
       if (matches.length) found.push(...matches)
       else missing.push(num)
     }
@@ -109,9 +220,7 @@ export function SelectPage() {
       return
     }
 
-    const emptySources = emptyMode
-      ? [...unselected].sort(() => Math.random() - 0.5).slice(0, selected.length)
-      : []
+    const emptySources = emptyMode ? pickRandomCards(unselected, selected.length) : []
     const emptySourceIds = new Set(emptySources.map((card) => card.id))
     // 休息曲池排除参赛牌与空牌来源牌（与桌面版一致）
     const restPool = unselected
@@ -195,8 +304,8 @@ export function SelectPage() {
             className="btn btn-secondary"
             type="button"
             onClick={() => {
-              const pool = [...visibleCards].sort(() => Math.random() - 0.5)
-              setSelectedIds(new Set(pool.slice(0, Math.min(cardLimit, pool.length)).map((c) => c.id)))
+              const pool = pickRandomCards(visibleCards, cardLimit)
+              setSelectedIds(new Set(pool.map((c) => c.id)))
             }}
           >
             随机选择
@@ -212,15 +321,8 @@ export function SelectPage() {
         </label>
       </section>
 
-      <section className="card-grid" style={{ marginTop: 16 }}>
-        {visibleCards.map((card) => (
-          <CardTile
-            key={card.id}
-            card={card}
-            selected={selectedIds.has(card.id)}
-            onClick={() => toggleCard(card)}
-          />
-        ))}
+      <section style={{ marginTop: 16 }}>
+        <LocalCardGrid cards={visibleCards} selectedIds={selectedIds} onToggle={toggleCard} />
       </section>
 
       {!visibleCards.length ? <div className="empty-state">没有匹配的卡面</div> : null}
