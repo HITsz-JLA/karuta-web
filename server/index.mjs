@@ -265,7 +265,7 @@ app.get('/api/packages/:id/catalog', async (request, response, next) => {
   try {
     const catalog = await onlineRooms.getPackageCatalog(request.params.id)
     if (!catalog) {
-      response.status(404).json({ message: '在线 MUCA 牌组不存在' })
+      response.status(404).json({ message: '在线牌组不存在' })
       return
     }
     const cached = catalogResponseCache.get(catalog) || buildCatalogResponse(catalog)
@@ -381,7 +381,10 @@ app.get('/api/online/room/:code/audio/:token', async (request, response, next) =
     const range = media.range
     const totalBytes = media.totalBytes
     response.setHeader('Content-Type', audioMime(media.name || asset.fileName))
-    response.setHeader('Cache-Control', 'private, no-store')
+    // Tokens are single-room, short-lived URLs. A short private cache keeps a
+    // retry or media rebuffer from reopening the large ZIP member while never
+    // making the audio publicly cacheable.
+    response.setHeader('Cache-Control', 'private, max-age=60, must-revalidate')
     response.setHeader('Accept-Ranges', 'bytes')
     if (range?.invalid) {
       response.status(416)

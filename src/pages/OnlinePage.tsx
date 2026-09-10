@@ -13,7 +13,7 @@ import {
 } from '../lib/onlineProtocol'
 import { OnlineSocket } from '../lib/onlineSocket'
 import {
-  CURATED_MUCA_PACKAGES,
+  CURATED_SERVER_PACKAGES,
   getServerPackageCatalog,
   listServerPackages,
   serverCardImageUrl,
@@ -254,12 +254,12 @@ export function OnlinePage() {
   const [catalogLoading, setCatalogLoading] = useState(false)
   const onlinePackages = useMemo(
     () =>
-      CURATED_MUCA_PACKAGES.map((meta) => ({
+      CURATED_SERVER_PACKAGES.map((meta) => ({
         meta,
         serverPackage: serverPackages.find((item) => item.id === meta.id),
       })).filter(
         (item): item is {
-          meta: (typeof CURATED_MUCA_PACKAGES)[number]
+          meta: (typeof CURATED_SERVER_PACKAGES)[number]
           serverPackage: ServerPackage
         } => Boolean(item.serverPackage),
       ),
@@ -418,7 +418,7 @@ export function OnlinePage() {
         if (!cancelled) setServerPackages(packages)
       })
       .catch((error) => {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : '无法读取服务器 MUCA 牌组')
+        if (!cancelled) setMessage(error instanceof Error ? error.message : '无法读取服务器牌组')
       })
       .finally(() => {
         if (!cancelled) setPackagesLoading(false)
@@ -683,13 +683,49 @@ export function OnlinePage() {
     audio.muted = false
     audio.volume = round ? 1 : REST_AUDIO_VOLUME
     audio.src = source
+    // Start the media request as soon as the round announcement arrives. The
+    // server announces ROUND_LEAD_MS before startAt, so normal tracks are
+    // buffered before the authoritative countdown reaches zero.
     audio.load()
+    setAudioStatus('loading')
     const localStart = round ? socket.toLocalTime(round.startAtServerTime) : Date.now()
     let attempt = 0
-    const retryPlay = () => {
+    let readyTimeout: number | null = null
+    let readyResolve: (() => void) | null = null
+    let readyReject: ((error: unknown) => void) | null = null
+    const finishReadyWait = (error?: unknown) => {
+      if (readyTimeout !== null) window.clearTimeout(readyTimeout)
+      readyTimeout = null
+      audio.removeEventListener('canplay', onReady)
+      audio.removeEventListener('error', onReadyError)
+      const resolve = readyResolve
+      const reject = readyReject
+      readyResolve = null
+      readyReject = null
+      if (error) reject?.(error)
+      else resolve?.()
+    }
+    const onReady = () => finishReadyWait()
+    const onReadyError = (error: Event) => finishReadyWait(error)
+    const waitForReady = () => {
+      if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve()
+      return new Promise<void>((resolve, reject) => {
+        readyResolve = resolve
+        readyReject = reject
+        audio.addEventListener('canplay', onReady, { once: true })
+        audio.addEventListener('error', onReadyError, { once: true })
+        // Do not let a slow connection stall the state machine forever. After
+        // the grace period play() is attempted and the browser can continue
+        // buffering while the round is already visible.
+        readyTimeout = window.setTimeout(() => finishReadyWait(), round ? 2_500 : 4_000)
+      })
+    }
+    const retryPlay = async () => {
       if (generation !== audioGenerationRef.current) return
       setAudioStatus('loading')
       try {
+        await waitForReady()
+        if (generation !== audioGenerationRef.current) return
         void audio.play()
           .then(() => {
             if (generation === audioGenerationRef.current) {
@@ -705,10 +741,7 @@ export function OnlinePage() {
             }
             if (attempt < 3) {
               attempt += 1
-              audioRetryTimerRef.current = window.setTimeout(() => {
-                audio.load()
-                retryPlay()
-              }, 350 * attempt)
+              audioRetryTimerRef.current = window.setTimeout(() => void retryPlay(), 350 * attempt)
               return
             }
             setAudioStatus('error')
@@ -716,7 +749,7 @@ export function OnlinePage() {
       } catch {
         if (attempt < 3) {
           attempt += 1
-          audioRetryTimerRef.current = window.setTimeout(retryPlay, 350 * attempt)
+          audioRetryTimerRef.current = window.setTimeout(() => void retryPlay(), 350 * attempt)
         } else {
           setAudioStatus('error')
         }
@@ -733,6 +766,7 @@ export function OnlinePage() {
       window.clearTimeout(playTimer)
       if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
       audioRetryTimerRef.current = null
+      finishReadyWait(new DOMException('audio source changed', 'AbortError'))
       stopRemainingTimer()
       audio.pause()
     }
@@ -884,7 +918,7 @@ export function OnlinePage() {
 
   const createRoom = useCallback(async () => {
     if (!selectedPackage || !catalog) {
-      setMessage('请先选择服务器 MUCA 牌组')
+      setMessage('请先选择服务器牌组')
       return
     }
     const cards = catalog.cards.filter((card) => selectedIds.has(card.key))
@@ -1411,7 +1445,7 @@ export function OnlinePage() {
             <div className="field">
               <label htmlFor="onlineDeck">使用服务器牌组</label>
               <select id="onlineDeck" value={activePackageId} onChange={(event) => setSelectedPackageId(event.target.value)} disabled={packagesLoading || catalogLoading}>
-                <option value="">{onlinePackages.length ? '请选择服务器牌组' : '服务器暂无 MUCA 牌组'}</option>
+                <option value="">{onlinePackages.length ? '请选择服务器牌组' : '服务器暂无可用牌组'}</option>
                 {onlinePackages.map(({ meta, serverPackage }) => (
                   <option key={serverPackage.id} value={serverPackage.id}>
                     {meta.name} · {serverPackage.name}
@@ -1420,7 +1454,7 @@ export function OnlinePage() {
               </select>
             </div>
             {!packagesLoading && !onlinePackages.length ? (
-              <p className="notice warn">在线歌牌只使用服务器上的四套 MUCA 牌组，请联系管理员检查 data-packages。</p>
+              <p className="notice warn">在线歌牌只使用服务器上已发布的牌组，请联系管理员检查 data-packages。</p>
             ) : null}
             <div className="row">
               <div className="field" style={{ flex: '0 0 120px' }}>
@@ -1433,7 +1467,7 @@ export function OnlinePage() {
               </div>
             </div>
             <div className="row spread draft-selection-summary">
-              <p className="muted small">已选 {selectedIds.size} / {boardCount} 张；奇数会由服务器随机弃置 1 张后平分，再由双方各选 30 张。</p>
+              <p className="muted small">已选 {selectedIds.size} / {boardCount} 张；超过 200 张时服务器会先随机抽 200 张，再由双方各分到 100 张并各选 30 张；奇数会先弃置 1 张。</p>
               <button className="btn btn-secondary" type="button" onClick={selectAllCandidates} disabled={!eligibleCards.length}>全选服务器牌组</button>
             </div>
             {catalogLoading ? <div className="empty-state">正在读取服务器牌组目录…</div> : null}

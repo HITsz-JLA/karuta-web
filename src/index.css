@@ -519,6 +519,7 @@ body:has(.online-page) .btn-ghost {
 .muca-package-card.bangdream .muca-package-badge { background: linear-gradient(145deg, #ff9f43, #ff5b7c); }
 .muca-package-card.galgame .muca-package-badge { background: linear-gradient(145deg, #64d9ff, #5867ff); }
 .muca-package-card.anime .muca-package-badge { background: linear-gradient(145deg, #7ff5cf, #3b9dff); }
+.muca-package-card.maimai .muca-package-badge { background: linear-gradient(145deg, #ffd36a, #ff6ca8 55%, #6c7dff); }
 
 .muca-package-info {
   display: grid;

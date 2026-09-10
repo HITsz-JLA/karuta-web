@@ -28,12 +28,18 @@ export interface ServerPackageCatalog {
   cards: ServerPackageCatalogCard[]
 }
 
-/** The four curated local MUCA packs exposed to ordinary players. */
+/** The four original curated MUCA packs retained for the local import preference. */
 export const CURATED_MUCA_PACKAGES = [
   { id: 'jla-muca-pjsk-lite.zip', code: 'PJSK', name: 'Project SEKAI', tone: 'pjsk' },
   { id: 'jla-muca-bangdream-lite.zip', code: 'BD', name: 'BanG Dream!', tone: 'bangdream' },
   { id: 'jla-muca-galgame-lite.zip', code: 'GAL', name: 'Galgame', tone: 'galgame' },
   { id: 'jla-muca-anime-lite.zip', code: 'ANI', name: 'Anime', tone: 'anime' },
+] as const
+
+/** Server-hosted packs available to online rooms and optional local import. */
+export const CURATED_SERVER_PACKAGES = [
+  ...CURATED_MUCA_PACKAGES,
+  { id: 'maimai-master-12plus.zip', code: 'MAI', name: 'maimai MASTER 12+', tone: 'maimai' },
 ] as const
 
 export function isCuratedMucaPackage(packageId: string | undefined): boolean {

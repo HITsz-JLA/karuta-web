@@ -6,7 +6,7 @@ import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
 import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
 import {
-  CURATED_MUCA_PACKAGES,
+  CURATED_SERVER_PACKAGES,
   downloadServerPackage,
   isCuratedMucaPackage,
   listServerPackages,
@@ -133,12 +133,12 @@ export function HomePage() {
 
   const curatedServerPackages = useMemo(
     () =>
-      CURATED_MUCA_PACKAGES.map((meta) => ({
+      CURATED_SERVER_PACKAGES.map((meta) => ({
         meta,
         serverPackage: serverPackages.find((item) => item.id === meta.id),
       })).filter(
         (item): item is {
-          meta: (typeof CURATED_MUCA_PACKAGES)[number]
+          meta: (typeof CURATED_SERVER_PACKAGES)[number]
           serverPackage: ServerPackage
         } => Boolean(item.serverPackage),
       ),
@@ -300,12 +300,12 @@ export function HomePage() {
 
           <section className="panel stack" style={{ boxShadow: 'none' }}>
             <div className="row spread">
-              <strong>四套 MUCA 牌组</strong>
+              <strong>服务器牌组</strong>
               <span className="muted small">在线使用服务器卡面</span>
             </div>
             {packagesLoading ? <div className="empty-state">正在读取服务器数据包…</div> : null}
             {!packagesLoading && !curatedServerPackages.length ? (
-              <div className="empty-state">服务器暂时没有可用的 MUCA 牌组</div>
+              <div className="empty-state">服务器暂时没有可用的牌组</div>
             ) : null}
             {!packagesLoading ? (
               <div className="muca-package-grid">
