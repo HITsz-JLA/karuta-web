@@ -30,7 +30,7 @@ const BAN_SIZE = 5
 const MAX_HAND_SLOTS = 33
 const REST_AUDIO_VOLUME = 0.28
 const EMPTY_CARD_KEYS: string[] = []
-const ONLINE_CLOCK_TICK_MS = 250
+const COUNTDOWN_EARLY_WAKE_MS = 24
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
 type BattleStyle = 'text' | 'card'
@@ -43,6 +43,31 @@ function setCountdownRemaining(setter: Dispatch<SetStateAction<number>>, nextVal
     if ((previous > 0) === (next > 0) && Math.ceil(previous / 1000) === Math.ceil(next / 1000)) return previous
     return next
   })
+}
+
+/**
+ * Countdown text only changes at one-second boundaries. A 250ms interval was
+ * waking every active match several times more often than the UI can display.
+ * Schedule the next wake close to the next boundary and keep the small early
+ * margin so background timer rounding cannot leave a stale second visible.
+ */
+function scheduleCountdown(getRemaining: () => number, setter: Dispatch<SetStateAction<number>>) {
+  let timer: number | null = null
+  const update = () => {
+    const remaining = Math.max(0, getRemaining())
+    setCountdownRemaining(setter, remaining)
+    if (remaining <= 0) {
+      timer = null
+      return
+    }
+    const untilBoundary = remaining % 1000 || 1000
+    timer = window.setTimeout(update, Math.min(1000, untilBoundary + COUNTDOWN_EARLY_WAKE_MS))
+  }
+  update()
+  return () => {
+    if (timer !== null) window.clearTimeout(timer)
+    timer = null
+  }
 }
 
 function readBattleStyle(): BattleStyle {
@@ -559,21 +584,15 @@ export function OnlinePage() {
     const playTimer = window.setTimeout(() => {
       retryPlay()
     }, Math.max(0, localStart - Date.now()))
-    const updateRemaining = () => {
-      if (!round) {
-        setRoundRemaining(0)
-        return
-      }
-      const left = localStart + round.windowMs - Date.now()
-      setCountdownRemaining(setRoundRemaining, left)
-    }
-    updateRemaining()
-    const remainingTimer = window.setInterval(updateRemaining, ONLINE_CLOCK_TICK_MS)
+    const stopRemainingTimer = scheduleCountdown(
+      () => (round ? localStart + round.windowMs - Date.now() : 0),
+      setRoundRemaining,
+    )
     return () => {
       window.clearTimeout(playTimer)
       if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
       audioRetryTimerRef.current = null
-      window.clearInterval(remainingTimer)
+      stopRemainingTimer()
       audio.pause()
     }
   }, [room?.restAudioUrl, round, socket])
@@ -584,10 +603,7 @@ export function OnlinePage() {
       return
     }
     const localEnd = socket.toLocalTime(room.draft.arrangeEndsAtServerTime)
-    const update = () => setCountdownRemaining(setArrangeRemaining, localEnd - Date.now())
-    update()
-    const timer = window.setInterval(update, 250)
-    return () => window.clearInterval(timer)
+    return scheduleCountdown(() => localEnd - Date.now(), setArrangeRemaining)
   }, [room?.draft.arrangeEndsAtServerTime, room?.phase, socket])
 
   useEffect(() => {
@@ -596,10 +612,7 @@ export function OnlinePage() {
       return
     }
     const localEnd = socket.toLocalTime(room.restEndsAtServerTime)
-    const update = () => setCountdownRemaining(setRestRemaining, localEnd - Date.now())
-    update()
-    const timer = window.setInterval(update, 250)
-    return () => window.clearInterval(timer)
+    return scheduleCountdown(() => localEnd - Date.now(), setRestRemaining)
   }, [room?.phase, room?.restEndsAtServerTime, socket])
 
   useEffect(() => {
@@ -611,16 +624,14 @@ export function OnlinePage() {
     }
 
     const localLaunchAt = socket.toLocalTime(launchAt)
-    const update = () => setCountdownRemaining(setArrangeReadyRemaining, localLaunchAt - Date.now())
-    update()
-    const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
+    const stopCountdown = scheduleCountdown(() => localLaunchAt - Date.now(), setArrangeReadyRemaining)
 
     if (announcedArrangeReadyRef.current !== launchAt) {
       announcedArrangeReadyRef.current = launchAt
       playReadyCue()
     }
 
-    return () => window.clearInterval(timer)
+    return stopCountdown
   }, [room?.arrangeReadyStartAtServerTime, socket])
 
   useEffect(() => {
@@ -632,16 +643,14 @@ export function OnlinePage() {
     }
 
     const localLaunchAt = socket.toLocalTime(launchAt)
-    const update = () => setCountdownRemaining(setRestReadyRemaining, localLaunchAt - Date.now())
-    update()
-    const timer = window.setInterval(update, ONLINE_CLOCK_TICK_MS)
+    const stopCountdown = scheduleCountdown(() => localLaunchAt - Date.now(), setRestReadyRemaining)
 
     if (announcedRestReadyRef.current !== launchAt) {
       announcedRestReadyRef.current = launchAt
       playReadyCue()
     }
 
-    return () => window.clearInterval(timer)
+    return stopCountdown
   }, [room?.restReadyStartAtServerTime, socket])
 
   useEffect(() => {

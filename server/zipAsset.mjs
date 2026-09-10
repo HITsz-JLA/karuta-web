@@ -7,15 +7,18 @@ const END_OF_CENTRAL_DIRECTORY = 0x06054b50
 const CENTRAL_DIRECTORY_ENTRY = 0x02014b50
 const LOCAL_FILE_HEADER = 0x04034b50
 const MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
+const MAX_DIRECTORY_CACHE_ENTRIES = 16
 const directoryCache = new Map()
+const directoryLoadInFlight = new Map()
+const assetReadInFlight = new Map()
 
 /**
  * Read one small media member from a ZIP without inflating the whole server
  * package. The existing data packages can be hundreds of megabytes, so loading
  * them through JSZip for every online round would make a room unusable.
  */
-export async function readZipAsset(filePath, requestPath, fallbackName = '', kind = 'audio') {
-  return readZipAssetInternal(filePath, requestPath, fallbackName, kind)
+export function readZipAsset(filePath, requestPath, fallbackName = '', kind = 'audio') {
+  return readZipAssetShared(filePath, requestPath, fallbackName, kind)
 }
 
 /**
@@ -23,38 +26,31 @@ export async function readZipAsset(filePath, requestPath, fallbackName = '', kin
  * method 0) can be read directly from the archive; deflated members keep the
  * existing full-read/decompress fallback.
  */
-export async function readZipAssetRange(filePath, requestPath, fallbackName = '', rangeHeader = '', kind = 'audio') {
-  return readZipAssetInternal(filePath, requestPath, fallbackName, kind, rangeHeader)
+export function readZipAssetRange(filePath, requestPath, fallbackName = '', rangeHeader = '', kind = 'audio') {
+  return readZipAssetShared(filePath, requestPath, fallbackName, kind, rangeHeader)
+}
+
+function readZipAssetShared(filePath, requestPath, fallbackName, kind, rangeHeader = null) {
+  // Browser media requests can overlap; share one read/decompression promise
+  // so a duplicate request does not repeat ZIP IO or inflate work.
+  const key = JSON.stringify([filePath, requestPath, fallbackName, kind, rangeHeader])
+  const inFlight = assetReadInFlight.get(key)
+  if (inFlight) return inFlight
+
+  const promise = readZipAssetInternal(filePath, requestPath, fallbackName, kind, rangeHeader)
+  assetReadInFlight.set(key, promise)
+  const clear = () => {
+    if (assetReadInFlight.get(key) === promise) assetReadInFlight.delete(key)
+  }
+  void promise.then(clear, clear)
+  return promise
 }
 
 async function readZipAssetInternal(filePath, requestPath, fallbackName, kind, rangeHeader = null) {
   const handle = await fs.open(filePath, 'r')
   try {
     const { size, mtimeMs } = await handle.stat()
-    const cached = directoryCache.get(filePath)
-    let members = cached && cached.size === size && cached.mtimeMs === mtimeMs ? cached.members : null
-    if (!members) {
-      const tailSize = Math.min(size, 0xffff + 22)
-      const tail = Buffer.alloc(tailSize)
-      await readAt(handle, tail, size - tailSize)
-      const eocd = findSignatureFromEnd(tail, END_OF_CENTRAL_DIRECTORY)
-      if (eocd < 0 || eocd + 22 > tail.length) throw new Error('ZIP 目录不存在')
-
-      const disk = tail.readUInt16LE(eocd + 4)
-      const directoryDisk = tail.readUInt16LE(eocd + 6)
-      const entries = tail.readUInt16LE(eocd + 10)
-      const directorySize = tail.readUInt32LE(eocd + 12)
-      const directoryOffset = tail.readUInt32LE(eocd + 16)
-      if (disk !== 0 || directoryDisk !== 0 || entries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
-        throw new Error('不支持多磁盘或 Zip64 数据包')
-      }
-      if (directorySize > 64 * 1024 * 1024) throw new Error('ZIP 目录过大')
-
-      const directory = Buffer.alloc(directorySize)
-      await readAt(handle, directory, directoryOffset)
-      members = parseDirectory(directory, entries)
-      directoryCache.set(filePath, { size, mtimeMs, members })
-    }
+    const members = await loadDirectory(handle, filePath, size, mtimeMs)
     const member = findMember(members, requestPath, fallbackName, kind)
     if (!member) throw new Error(`找不到${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源`)
     if (member.uncompressedSize > MAX_ARCHIVE_ENTRY_BYTES) throw new Error(`${kind === 'image' ? '卡面' : kind === 'catalog' ? '目录' : '音频'}资源过大`)
@@ -93,6 +89,54 @@ async function readZipAssetInternal(filePath, requestPath, fallbackName, kind, r
   } finally {
     await handle.close()
   }
+}
+
+async function loadDirectory(handle, filePath, size, mtimeMs) {
+  const cached = directoryCache.get(filePath)
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
+    directoryCache.delete(filePath)
+    directoryCache.set(filePath, cached)
+    return cached.members
+  }
+
+  // Several card requests commonly arrive together on a cold archive. Share
+  // the central-directory read while retaining a bounded completed cache.
+  const pending = directoryLoadInFlight.get(filePath)
+  if (pending && pending.size === size && pending.mtimeMs === mtimeMs) return pending.promise
+
+  const promise = readDirectory(handle, size)
+  const entry = { size, mtimeMs, promise }
+  directoryLoadInFlight.set(filePath, entry)
+  try {
+    const members = await promise
+    directoryCache.set(filePath, { size, mtimeMs, members })
+    while (directoryCache.size > MAX_DIRECTORY_CACHE_ENTRIES) directoryCache.delete(directoryCache.keys().next().value)
+    return members
+  } finally {
+    if (directoryLoadInFlight.get(filePath) === entry) directoryLoadInFlight.delete(filePath)
+  }
+}
+
+async function readDirectory(handle, size) {
+  const tailSize = Math.min(size, 0xffff + 22)
+  const tail = Buffer.alloc(tailSize)
+  await readAt(handle, tail, size - tailSize)
+  const eocd = findSignatureFromEnd(tail, END_OF_CENTRAL_DIRECTORY)
+  if (eocd < 0 || eocd + 22 > tail.length) throw new Error('ZIP 目录不存在')
+
+  const disk = tail.readUInt16LE(eocd + 4)
+  const directoryDisk = tail.readUInt16LE(eocd + 6)
+  const entries = tail.readUInt16LE(eocd + 10)
+  const directorySize = tail.readUInt32LE(eocd + 12)
+  const directoryOffset = tail.readUInt32LE(eocd + 16)
+  if (disk !== 0 || directoryDisk !== 0 || entries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
+    throw new Error('不支持多磁盘或 Zip64 数据包')
+  }
+  if (directorySize > 64 * 1024 * 1024) throw new Error('ZIP 目录过大')
+
+  const directory = Buffer.alloc(directorySize)
+  await readAt(handle, directory, directoryOffset)
+  return parseDirectory(directory, entries)
 }
 
 function parseByteRange(header, totalBytes) {
@@ -147,7 +191,7 @@ function parseDirectory(buffer, expectedEntries) {
     }
     const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength)
     if (!(flags & 0x0001) && !name.endsWith('/')) {
-      members.push({ name, compression, compressedSize, uncompressedSize, localHeaderOffset })
+      members.push({ name, normalizedName: normalize(name), compression, compressedSize, uncompressedSize, localHeaderOffset })
     }
     offset = end
   }
@@ -159,7 +203,7 @@ function findMember(members, requestPath, fallbackName, kind) {
   const requested = normalize(requestPath)
   const fallback = normalize(fallbackName)
   const direct = members.find((member) => {
-    const name = normalize(member.name)
+    const name = member.normalizedName
     return requested && (name === requested || name.endsWith(`/${requested}`))
   })
   if (direct) return direct
@@ -167,15 +211,15 @@ function findMember(members, requestPath, fallbackName, kind) {
   const relative = kind === 'image' ? imageRelativePath(requested) : audioRelativePath(requested)
   if (relative) {
     const segment = members.find((member) => {
-      const name = normalize(member.name)
+      const name = member.normalizedName
       return (kind === 'image' ? isImageName(name) : isSegmentName(name)) && name.endsWith(`/${relative}`)
     })
     if (segment) return segment
   }
 
   if (!fallback) return null
-  const byName = members.filter((member) => normalize(member.name).endsWith(`/${fallback}`) || normalize(member.name) === fallback)
-  return byName.find((member) => (kind === 'image' ? isImageName(normalize(member.name)) : isSegmentName(normalize(member.name)))) || byName[0] || null
+  const byName = members.filter((member) => member.normalizedName.endsWith(`/${fallback}`) || member.normalizedName === fallback)
+  return byName.find((member) => (kind === 'image' ? isImageName(member.normalizedName) : isSegmentName(member.normalizedName))) || byName[0] || null
 }
 
 function audioRelativePath(value) {

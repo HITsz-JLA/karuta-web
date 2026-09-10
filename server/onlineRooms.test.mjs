@@ -214,6 +214,74 @@ test('network measurements block unfair rooms before the match starts', async ()
   }
 })
 
+test('stable heartbeat metrics and idle cleanup do not fan out redundant updates', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-heartbeat-dedup-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    recordPongs(manager, host, Array.from({ length: 12 }, () => 20))
+    const hostNetworkMessages = hostSocket.messages.filter((message) => message.t === 'network').length
+    const guestNetworkMessages = guestSocket.messages.filter((message) => message.t === 'network').length
+    recordPongs(manager, host, [20, 20, 20])
+    assert.equal(hostSocket.messages.filter((message) => message.t === 'network').length, hostNetworkMessages)
+    assert.equal(guestSocket.messages.filter((message) => message.t === 'network').length, guestNetworkMessages)
+
+    const roomMessages = hostSocket.messages.filter((message) => message.t === 'room').length
+    manager.cleanup()
+    assert.equal(hostSocket.messages.filter((message) => message.t === 'room').length, roomMessages)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('room snapshots reuse serialized views until room state changes', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-snapshot-cache-'))
+  const manager = new OnlineRoomManager(temp)
+  let viewCount = 0
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const spectatorSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    const spectator = manager.connect(spectatorSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    const room = [...manager.rooms.values()][0]
+    spectator.room = room
+    spectator.spectator = true
+    room.addSpectator(spectator)
+
+    const originalView = room.view.bind(room)
+    room.view = (...args) => {
+      viewCount += 1
+      return originalView(...args)
+    }
+    room.sendRoom()
+    const firstCount = viewCount
+    assert.equal(firstCount, 3)
+    room.sendRoom()
+    assert.equal(viewCount, firstCount)
+    room.touch()
+    room.sendRoom()
+    assert.equal(viewCount, firstCount + 3)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('resumed clients receive a full room snapshot after incremental updates', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-'))
   const manager = new OnlineRoomManager(temp)

@@ -1,6 +1,5 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
-import { promises as fs } from 'node:fs'
 import { CURATED_PACKAGE_IDS, findCatalogCard, loadPackageCatalog } from './packageCatalog.mjs'
 import { readZipAsset } from './zipAsset.mjs'
 
@@ -97,12 +96,19 @@ export class OnlineRoomManager {
   recordPong(session, rttMs) {
     if (!session || !this.sessions.has(session.socket)) return
     if (!Number.isFinite(rttMs) || rttMs < 0 || rttMs > NETWORK_MAX_RTT_MS) return
+    const previousSampleCount = session.network.samples.length
+    const previousRttMs = session.network.rttMs
+    const previousJitterMs = session.network.jitterMs
     session.network.samples.push(roundMetric(rttMs))
     if (session.network.samples.length > NETWORK_MAX_SAMPLES) session.network.samples.shift()
     const metrics = networkMetrics(session.network.samples)
     session.network.rttMs = metrics.rttMs
     session.network.jitterMs = metrics.jitterMs
-    if (session.room) session.room.networkChanged()
+    const changed =
+      previousSampleCount !== metrics.samples || previousRttMs !== metrics.rttMs || previousJitterMs !== metrics.jitterMs
+    // Heartbeats still update the authoritative rolling samples, but identical
+    // metrics do not need to wake every player and spectator.
+    if (session.room && changed) session.room.networkChanged()
   }
 
   async handle(session, rawMessage) {
@@ -188,11 +194,6 @@ export class OnlineRoomManager {
     const room = this.rooms.get(normalizeCode(roomCode))
     const asset = room?.assetForToken(token)
     if (!asset) return null
-    try {
-      await fs.access(path.join(this.dataDir, asset.packageId))
-    } catch {
-      return null
-    }
     return { ...asset, packagePath: path.join(this.dataDir, asset.packageId) }
   }
 
@@ -250,6 +251,7 @@ export class OnlineRoomManager {
     // A resumed client may have missed every incremental network/peer update
     // while it was disconnected. Restore the authoritative room snapshot
     // before continuing with heartbeat-only updates.
+    record.room.touch()
     record.room.networkChanged(true)
     record.room.broadcastPeer(record.playerId, true)
   }
@@ -385,6 +387,7 @@ export class OnlineRoomManager {
     session.resumeToken = resumeToken
     this.resumeIndex.set(resumeToken, { room, playerId, expiresAt: Date.now() + RESUME_TTL_MS })
     this.send(session, { t: 'welcome', resumed: false, resumeToken })
+    room.touch()
     room.sendRoom()
   }
 
@@ -431,8 +434,9 @@ export class OnlineRoomManager {
 
   broadcastRoomList() {
     const message = { t: 'roomList', rooms: this.roomList() }
+    const serialized = JSON.stringify(message)
     for (const session of this.sessions.values()) {
-      if (!session.room) this.send(session, message)
+      if (!session.room) this.sendSerialized(session, serialized)
     }
   }
 
@@ -464,8 +468,12 @@ export class OnlineRoomManager {
   }
 
   send(session, message) {
+    this.sendSerialized(session, JSON.stringify(message))
+  }
+
+  sendSerialized(session, serialized) {
     try {
-      if (session?.socket?.readyState === 1) session.socket.send(JSON.stringify(message))
+      if (session?.socket?.readyState === 1) session.socket.send(serialized)
     } catch {
       // A close can race with a broadcast. The close handler owns cleanup.
     }
@@ -513,6 +521,8 @@ class OnlineRoom {
     this.restReadyStartAt = null
     this.pendingTransfer = null
     this.lastActivity = Date.now()
+    this.viewVersion = 0
+    this.viewCache = new Map()
     this.disposed = false
   }
 
@@ -1136,16 +1146,24 @@ class OnlineRoom {
   }
 
   expireDisconnected(now) {
+    let changed = false
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (seat?.disconnectedAt && now - seat.disconnectedAt > RESUME_TTL_MS) {
         this.manager.resumeIndex.delete(seat.resumeToken)
         this.seats[playerId] = null
         this.resetMatch()
+        changed = true
       }
     }
     if (!this.seats.A && !this.seats.B) this.manager.dropRoom(this)
-    else this.sendRoom()
+    // Countdown timestamps are already part of the last snapshot; only an
+    // actual resume expiry changes room state and needs a full fan-out.
+    else if (changed) {
+      this.touch()
+      this.sendRoom()
+      this.manager.broadcastRoomList()
+    }
   }
 
   resetMatch() {
@@ -1218,14 +1236,14 @@ class OnlineRoom {
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (!seat?.socket) continue
-      this.manager.send(seat.socket, { t: 'room', room: this.view(playerId) })
+      this.manager.sendSerialized(seat.socket, this.serializedRoomView(playerId))
     }
     for (const spectator of this.spectators) this.sendSpectator(spectator)
   }
 
   sendSpectator(session) {
     if (!this.spectators.has(session)) return
-    this.manager.send(session, { t: 'room', room: this.view('A', true) })
+    this.manager.sendSerialized(session, this.serializedRoomView('A', true))
   }
 
   networkChanged(forceRoom = false) {
@@ -1257,12 +1275,13 @@ class OnlineRoom {
       },
       fairness,
     }
+    const serialized = JSON.stringify(message)
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (!seat?.socket) continue
-      this.manager.send(seat.socket, message)
+      this.manager.sendSerialized(seat.socket, serialized)
     }
-    for (const spectator of this.spectators) this.manager.send(spectator, message)
+    for (const spectator of this.spectators) this.manager.sendSerialized(spectator, serialized)
   }
 
   broadcastPeer(playerId, connected) {
@@ -1270,11 +1289,23 @@ class OnlineRoom {
   }
 
   broadcast(message) {
+    const serialized = JSON.stringify(message)
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
-      if (seat?.socket) this.manager.send(seat.socket, message)
+      if (seat?.socket) this.manager.sendSerialized(seat.socket, serialized)
     }
-    for (const spectator of this.spectators) this.manager.send(spectator, message)
+    for (const spectator of this.spectators) this.manager.sendSerialized(spectator, serialized)
+  }
+
+  serializedRoomView(playerId, spectator = false) {
+    // A room update has one view per privacy role. Reuse the encoded payload
+    // for all spectators and avoid rebuilding it for idle sends.
+    const cacheKey = spectator ? 'spectator' : playerId
+    const cached = this.viewCache.get(cacheKey)
+    if (cached?.version === this.viewVersion) return cached.serialized
+    const serialized = JSON.stringify({ t: 'room', room: this.view(playerId, spectator) })
+    this.viewCache.set(cacheKey, { version: this.viewVersion, serialized })
+    return serialized
   }
 
   view(you, spectator = false) {
@@ -1428,12 +1459,15 @@ class OnlineRoom {
 
   touch() {
     this.lastActivity = Date.now()
+    this.viewVersion += 1
+    this.viewCache.clear()
   }
 
   dispose() {
     this.disposed = true
     this.clearTimers()
     this.spectators.clear()
+    this.viewCache.clear()
   }
 }
 

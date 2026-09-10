@@ -34,6 +34,34 @@ const CARD_IMAGE_MEMORY_LIMIT = 96
 const cachedImageUrls = new Map<string, string>()
 const pendingImageLoads = new Map<string, Promise<string>>()
 let imageCachePromise: Promise<Cache> | null = null
+let sharedImageObserver: IntersectionObserver | null = null
+const observedImageTargets = new Map<Element, () => void>()
+
+function observeImageTarget(element: HTMLButtonElement, onVisible: () => void) {
+  if (typeof IntersectionObserver === 'undefined') return undefined
+  if (!sharedImageObserver) {
+    sharedImageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue
+          const callback = observedImageTargets.get(entry.target)
+          if (!callback) continue
+          observedImageTargets.delete(entry.target)
+          sharedImageObserver?.unobserve(entry.target)
+          callback()
+        }
+      },
+      { rootMargin: '240px' },
+    )
+  }
+  observedImageTargets.set(element, onVisible)
+  sharedImageObserver.observe(element)
+  return () => {
+    if (observedImageTargets.get(element) !== onVisible) return
+    observedImageTargets.delete(element)
+    sharedImageObserver?.unobserve(element)
+  }
+}
 
 async function openImageCache() {
   if (typeof caches === 'undefined') return null
@@ -114,22 +142,14 @@ function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (
       setShouldLoad(false)
       return
     }
-    if (cachedImageUrls.has(imageUrl) || typeof IntersectionObserver === 'undefined' || !imageTargetRef.current) {
+    const target = imageTargetRef.current
+    if (cachedImageUrls.has(imageUrl) || typeof IntersectionObserver === 'undefined' || !target) {
       setShouldLoad(true)
       return
     }
 
     setShouldLoad(false)
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return
-        setShouldLoad(true)
-        observer.disconnect()
-      },
-      { rootMargin: '240px' },
-    )
-    observer.observe(imageTargetRef.current)
-    return () => observer.disconnect()
+    return observeImageTarget(target, () => setShouldLoad(true))
   }, [imageUrl])
 
   useEffect(() => {
@@ -158,6 +178,44 @@ function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (
 
   if (!cachedImage || cachedImage.source !== imageUrl) return [undefined, setImageTarget]
   return [cachedImage.url, setImageTarget]
+}
+
+function sameCardMeta(previous: OnlineCardView, next: OnlineCardView) {
+  return (
+    previous.key === next.key &&
+    previous.number === next.number &&
+    previous.imageName === next.imageName &&
+    previous.workName === next.workName &&
+    previous.imageUrl === next.imageUrl
+  )
+}
+
+function areOnlineCardTilePropsEqual(previous: Props, next: Props) {
+  if (!sameCardMeta(previous.meta, next.meta)) return false
+  if (Boolean(previous.card) !== Boolean(next.card) || previous.card?.imageBlobKey !== next.card?.imageBlobKey) return false
+  return (
+    previous.available === next.available &&
+    previous.picked === next.picked &&
+    previous.result === next.result &&
+    previous.wrong === next.wrong &&
+    previous.readOnly === next.readOnly &&
+    previous.pinned === next.pinned &&
+    previous.showNumber === next.showNumber &&
+    previous.slotIndex === next.slotIndex &&
+    previous.stateLabel === next.stateLabel &&
+    previous.draggable === next.draggable &&
+    previous.dragging === next.dragging &&
+    previous.dropTarget === next.dropTarget &&
+    previous.onDragStart === next.onDragStart &&
+    previous.onDragOver === next.onDragOver &&
+    previous.onDrop === next.onDrop &&
+    previous.onDragEnd === next.onDragEnd &&
+    previous.onPointerDown === next.onPointerDown &&
+    previous.onPointerMove === next.onPointerMove &&
+    previous.onPointerUp === next.onPointerUp &&
+    previous.onPointerCancel === next.onPointerCancel &&
+    previous.onClick === next.onClick
+  )
 }
 
 /** A board tile deliberately keeps the local karuta card image as its main cue. */
@@ -237,4 +295,4 @@ export const OnlineCardTile = memo(function OnlineCardTile({
       {pinned ? <span className="online-card-state">已固定</span> : stateLabel ? <span className="online-card-state">{stateLabel}</span> : !available && !readOnly ? <span className="online-card-state">已收取</span> : null}
     </button>
   )
-})
+}, areOnlineCardTilePropsEqual)

@@ -23,6 +23,24 @@ test('readZipAsset reads a seg_30 member without exposing the archive', async ()
   }
 })
 
+test('coalesces concurrent reads of the same ZIP member', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-zip-in-flight-'))
+  try {
+    const archivePath = path.join(temp, 'package.zip')
+    const zip = new JSZip()
+    zip.file('mp3_files/seg_30/answer.mp3', Buffer.from('audio-bytes'))
+    await writeFile(archivePath, await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' }))
+
+    const first = readZipAsset(archivePath, 'mp3_files/seg_30/answer.mp3', 'answer.mp3')
+    const second = readZipAsset(archivePath, 'mp3_files/seg_30/answer.mp3', 'answer.mp3')
+    assert.strictEqual(first, second)
+    const asset = await first
+    assert.deepEqual(asset.data, Buffer.from('audio-bytes'))
+  } finally {
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('readZipAssetRange reads only the requested bytes from a stored member', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-zip-range-stored-'))
   try {
