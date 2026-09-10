@@ -577,6 +577,10 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     assert.ok(room.current.restEndsAtServerTime - Date.now() > 39_000)
     assert.equal(room.roundTimer, null)
     assert.equal(room.current.settlementTimer, null)
+    assert.equal(room.scores.A, 0)
+    assert.equal(room.scores.B, 1)
+    assert.equal(room.seats.B.score, 1)
+    assert.equal(latest(hostSocket, 'room').room.players.B.score, 1)
     assert.equal(latest(hostSocket, 'claimFeedback').penalty, true)
 
     const gift = room.seats.B.handCardKeys[0]
@@ -693,6 +697,8 @@ test('empty-song rounds use 20 outside songs once and treat every card click as 
     assert.equal('isEmpty' in result, false)
     assert.equal(result.winner, null)
     assert.equal(result.reason, 'wrong')
+    assert.equal(result.scores.A, 0)
+    assert.equal(result.scores.B, 1)
     assert.deepEqual(new Set(result.remainingCardKeys), before)
     assert.equal(room.seats.A.handCardKeys.length, hostHandBefore + 1)
     assert.equal(room.seats.B.handCardKeys.length, guestHandBefore - 1)
