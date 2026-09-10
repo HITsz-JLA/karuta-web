@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 import { CURATED_PACKAGE_IDS, findCatalogCard, loadPackageCatalog } from './packageCatalog.mjs'
+import { logOnlineEvent } from './onlineLog.mjs'
 import { readZipAsset } from './zipAsset.mjs'
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
@@ -110,6 +111,7 @@ export class OnlineRoomManager {
 
   connect(socket, ip = 'unknown') {
     const session = {
+      id: crypto.randomBytes(6).toString('hex'),
       socket,
       ip,
       room: null,
@@ -120,6 +122,7 @@ export class OnlineRoomManager {
       network: emptyNetwork(),
     }
     this.sessions.set(socket, session)
+    logOnlineEvent('ws.connected', { sessionId: session.id })
     this.send(session, { t: 'welcome', resumed: false })
     return session
   }
@@ -212,6 +215,14 @@ export class OnlineRoomManager {
   disconnect(session) {
     if (!this.sessions.delete(session.socket)) return
     const room = session.room
+    logOnlineEvent('ws.disconnected', {
+      sessionId: session.id,
+      room: room?.code,
+      playerId: session.playerId,
+      spectator: session.spectator,
+      phase: room?.phase,
+      reason: session.disconnectReason,
+    })
     if (!room) return
     if (session.spectator) {
       room.removeSpectator(session)
@@ -222,9 +233,13 @@ export class OnlineRoomManager {
   }
 
   async getAudio(roomCode, token) {
-    const room = this.rooms.get(normalizeCode(roomCode))
+    const normalizedRoomCode = normalizeCode(roomCode)
+    const room = this.rooms.get(normalizedRoomCode)
     const asset = room?.assetForToken(token)
-    if (!asset) return null
+    if (!asset) {
+      logOnlineEvent('audio.miss', { room: normalizedRoomCode })
+      return null
+    }
     return { ...asset, packagePath: path.join(this.dataDir, asset.packageId) }
   }
 
@@ -264,6 +279,11 @@ export class OnlineRoomManager {
     // resume token. In particular, a spectator must not be able to present a
     // player's token and become an input-capable session in the same room.
     if (session.room || session.spectator) {
+      logOnlineEvent('resume.rejected', {
+        reason: 'session_already_bound',
+        sessionId: session.id,
+        room: session.room?.code,
+      })
       this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
       return
     }
@@ -271,14 +291,26 @@ export class OnlineRoomManager {
     const record = this.resumeIndex.get(resumeToken)
     if (!record || record.expiresAt < Date.now()) {
       this.resumeIndex.delete(resumeToken)
+      logOnlineEvent('resume.rejected', {
+        reason: 'invalid_or_expired',
+        sessionId: session.id,
+        room: record?.room?.code,
+      })
       this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
       return
     }
     const seat = record.room.seats[record.playerId]
     if (!seat) {
+      logOnlineEvent('resume.rejected', {
+        reason: 'seat_missing',
+        sessionId: session.id,
+        room: record.room.code,
+        playerId: record.playerId,
+      })
       this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
       return
     }
+    let replacedSessionId
     if (seat.socket) {
       const previousSession = seat.socket
       // A browser refresh can open the replacement WebSocket before the old
@@ -292,8 +324,15 @@ export class OnlineRoomManager {
         previousSession.playerId === record.playerId &&
         !previousSession.spectator
       ) {
+        replacedSessionId = previousSession.id
         this.replacePlayerSession(previousSession)
       } else {
+        logOnlineEvent('resume.rejected', {
+          reason: 'seat_occupied',
+          sessionId: session.id,
+          room: record.room.code,
+          playerId: record.playerId,
+        })
         this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
         return
       }
@@ -304,6 +343,12 @@ export class OnlineRoomManager {
     seat.socket = session
     seat.disconnectedAt = null
     record.expiresAt = Date.now() + RESUME_TTL_MS
+    logOnlineEvent('resume.accepted', {
+      sessionId: session.id,
+      replacedSessionId,
+      room: record.room.code,
+      playerId: record.playerId,
+    })
     this.send(session, { t: 'welcome', resumed: true, resumeToken })
     // A resumed client may have missed every incremental network/peer update
     // while it was disconnected. Restore the authoritative room snapshot
@@ -315,6 +360,11 @@ export class OnlineRoomManager {
   }
 
   replacePlayerSession(session) {
+    logOnlineEvent('ws.replaced', {
+      sessionId: session.id,
+      room: session.room?.code,
+      playerId: session.playerId,
+    })
     this.sessions.delete(session.socket)
     session.replaced = true
     session.room = null
@@ -381,6 +431,7 @@ export class OnlineRoomManager {
     })
     this.rooms.set(room.code, room)
     this.joinSeat(room, session, nickname, 'A')
+    logOnlineEvent('room.created', { room: room.code, packageId, deckName })
     this.broadcastRoomList()
   }
 
@@ -405,6 +456,7 @@ export class OnlineRoomManager {
       return
     }
     this.joinSeat(room, session, nickname, 'B')
+    logOnlineEvent('room.joined', { room: room.code, playerId: 'B' })
     this.broadcastRoomList()
   }
 
@@ -429,6 +481,7 @@ export class OnlineRoomManager {
     }
     session.room = room
     session.spectator = true
+    logOnlineEvent('room.spectated', { room: room.code, sessionId: session.id })
     room.addSpectator(session)
     room.sendSpectatorState(session)
     room.sendNetwork()
@@ -462,6 +515,7 @@ export class OnlineRoomManager {
     session.playerId = playerId
     session.resumeToken = resumeToken
     this.resumeIndex.set(resumeToken, { room, playerId, expiresAt: Date.now() + RESUME_TTL_MS })
+    logOnlineEvent('seat.joined', { room: room.code, playerId, sessionId: session.id })
     this.send(session, { t: 'welcome', resumed: false, resumeToken })
     room.touch()
     room.sendRoom()
@@ -934,6 +988,13 @@ class OnlineRoom {
       restExpiresAt: null,
       expiresAt: startAt + ROUND_WINDOW_MS + REST_WINDOW_MS + 10_000,
     }
+    logOnlineEvent('round.started', {
+      room: this.code,
+      roundNo: this.roundNo,
+      isEmpty: choice.isEmpty,
+      cardKey: choice.cardKey || undefined,
+      song: choice.song.displayName,
+    })
     this.touch()
     this.broadcast({
       t: 'roundStart',
@@ -965,6 +1026,16 @@ class OnlineRoom {
     if (adjustedAt < current.startAt || adjustedAt > current.endsAt) return
     const correct = !current.isEmpty && cardKey === current.cardKey
     this.touch()
+    logOnlineEvent('claim.received', {
+      room: this.code,
+      roundNo: current.roundNo,
+      playerId,
+      correct,
+      isEmpty: current.isEmpty,
+      cardKey: cardKey || undefined,
+      rttMs: session.network?.rttMs,
+      compensationMs,
+    })
     if (correct) {
       current.claims.set(playerId, { cardKey, correct, receivedAt, adjustedAt, compensationMs })
       current.lastClaim = { t: 'claimFeedback', playerId, cardKey, correct }
@@ -1180,6 +1251,15 @@ class OnlineRoom {
       nextRoundAtServerTime: nextAt,
     }
     current.resultMessage = resultMessage
+    logOnlineEvent('round.resolved', {
+      room: this.code,
+      roundNo: current.roundNo,
+      reason,
+      winner,
+      isEmpty: current.isEmpty,
+      remainingCards: this.remaining.size,
+      pendingTransfer: Boolean(this.pendingTransfer),
+    })
     this.broadcast(resultMessage)
     this.sendRoom()
     if (emptyHandWinner) {
@@ -1226,6 +1306,13 @@ class OnlineRoom {
     if (!seat || !seat.socket) return
     seat.socket = null
     seat.disconnectedAt = Date.now()
+    logOnlineEvent('player.disconnected', {
+      room: this.code,
+      playerId,
+      phase: this.phase,
+      roundNo: this.current?.roundNo,
+      resumeTtlMs: RESUME_TTL_MS,
+    })
     if (this.phase === 'arrange') {
       seat.arrangeReady = false
       if (this.arrangeReadyStartAt) {
@@ -1250,6 +1337,11 @@ class OnlineRoom {
     for (const playerId of ['A', 'B']) {
       const seat = this.seats[playerId]
       if (seat?.disconnectedAt && now - seat.disconnectedAt > RESUME_TTL_MS) {
+        logOnlineEvent('resume.expired', {
+          room: this.code,
+          playerId,
+          phase: this.phase,
+        })
         this.manager.resumeIndex.delete(seat.resumeToken)
         this.seats[playerId] = null
         this.resetMatch()
