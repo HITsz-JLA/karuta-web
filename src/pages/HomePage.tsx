@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
 import { HomeNowPlaying } from '../components/HomeNowPlaying'
@@ -12,7 +12,80 @@ import {
   listServerPackages,
   type ServerPackage,
 } from '../lib/serverPackages'
-import type { FailureMode } from '../types/models'
+import type { CardEntry, FailureMode } from '../types/models'
+
+const HOME_WORK_ROW_HEIGHT = 64
+const HOME_WORK_VIEWPORT_HEIGHT = 640
+
+interface HomeWorkListProps {
+  cards: CardEntry[]
+  selectedIndex: number
+  onSelect: (index: number) => void
+}
+
+const HomeWorkItem = memo(function HomeWorkItem({
+  card,
+  index,
+  selected,
+  onSelect,
+}: {
+  card: CardEntry
+  index: number
+  selected: boolean
+  onSelect: (index: number) => void
+}) {
+  const handleClick = useCallback(() => onSelect(index), [index, onSelect])
+  return (
+    <button type="button" className={`work-item${selected ? ' active' : ''}`} onClick={handleClick}>
+      <span className="num">#{card.number}</span>
+      <span>
+        <strong>{card.workName}</strong>
+        <div className="muted small">{card.songs.length} 首</div>
+      </span>
+    </button>
+  )
+})
+
+/** Keeps large local decks scrollable without mounting every work row at once. */
+function HomeWorkList({ cards, selectedIndex, onSelect }: HomeWorkListProps) {
+  const scrollTopRef = useRef(0)
+  const scrollFrameRef = useRef<number | null>(null)
+  const [scrollTop, setScrollTop] = useState(0)
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
+    }
+  }, [])
+
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    scrollTopRef.current = event.currentTarget.scrollTop
+    if (scrollFrameRef.current !== null) return
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null
+      setScrollTop(scrollTopRef.current)
+    })
+  }, [])
+
+  const firstIndex = Math.max(0, Math.floor(scrollTop / HOME_WORK_ROW_HEIGHT) - 3)
+  const lastIndex = Math.min(
+    cards.length,
+    Math.ceil((scrollTop + HOME_WORK_VIEWPORT_HEIGHT) / HOME_WORK_ROW_HEIGHT) + 3,
+  )
+
+  return (
+    <div className="works-list works-list-virtualized" onScroll={handleScroll} aria-label={`作品列表，共 ${cards.length} 张卡牌`}>
+      <div className="works-list-canvas" style={{ height: `${cards.length * HOME_WORK_ROW_HEIGHT}px` }}>
+        <div className="works-list-window" style={{ top: `${firstIndex * HOME_WORK_ROW_HEIGHT}px` }}>
+          {cards.slice(firstIndex, lastIndex).map((card, offset) => {
+            const index = firstIndex + offset
+            return <HomeWorkItem key={card.id} card={card} index={index} selected={index === selectedIndex} onSelect={onSelect} />
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
@@ -39,6 +112,8 @@ export function HomePage() {
   const [previewIndex, setPreviewIndex] = useState(0)
   const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
   const [packagesLoading, setPackagesLoading] = useState(true)
+  const selectPreview = useCallback((index: number) => setPreviewIndex(index), [])
+  const updateVolume = useCallback((volume: number) => void update({ volume }), [update])
 
   useEffect(() => {
     const preferredDeck = decks.find((item) => isCuratedMucaPackage(item.sourcePackageId)) || decks[0]
@@ -186,7 +261,7 @@ export function HomePage() {
             deck={deck}
             selectedCard={previewCard}
             volume={settings.volume}
-            onVolumeChange={(volume) => void update({ volume })}
+            onVolumeChange={updateVolume}
           />
           <div className={`home-equalizer${deck?.cards.some((card) => card.songs.length) ? '' : ' paused'}`}>
             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((bar) => (
@@ -380,22 +455,12 @@ export function HomePage() {
             </span>
           </div>
 
-          <div className="works-list">
-            {(deck?.cards || []).map((card, index) => (
-              <button
-                key={card.id}
-                type="button"
-                className={`work-item${index === previewIndex ? ' active' : ''}`}
-                onClick={() => setPreviewIndex(index)}
-              >
-                <span className="num">#{card.number}</span>
-                <span>
-                  <strong>{card.workName}</strong>
-                  <div className="muted small">{card.songs.length} 首</div>
-                </span>
-              </button>
-            ))}
-          </div>
+          <HomeWorkList
+            key={selectedId || 'empty-deck'}
+            cards={deck?.cards || []}
+            selectedIndex={previewIndex}
+            onSelect={selectPreview}
+          />
         </section>
       </div>
 

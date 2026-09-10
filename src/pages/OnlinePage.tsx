@@ -1179,7 +1179,7 @@ export function OnlinePage() {
     setSelectedIds(new Set(eligibleCards.slice(0, nextSize).map((card) => card.key)))
   }
 
-  function toggleDraftCard(cardKey: string, limit: number, setter: Dispatch<SetStateAction<Set<string>>>) {
+  const toggleDraftCard = useCallback((cardKey: string, limit: number, setter: Dispatch<SetStateAction<Set<string>>>) => {
     setter((previous) => {
       const next = new Set(previous)
       if (next.has(cardKey)) next.delete(cardKey)
@@ -1187,17 +1187,26 @@ export function OnlinePage() {
       else setMessage(`本阶段最多选择 ${limit} 张卡牌`)
       return next
     })
-  }
+  }, [])
 
-  function submitDraftSelection() {
+  const submitDraftSelection = useCallback(() => {
     if (draftSelection.size !== DRAFT_SELECTION_SIZE) return
     if (!socket.send({ t: 'selectCards', cardKeys: [...draftSelection] })) setMessage('连接已断开，选牌没有送达')
-  }
+  }, [draftSelection, socket])
 
-  function submitDraftBan() {
+  const submitDraftBan = useCallback(() => {
     if (draftBans.size !== BAN_SIZE) return
     if (!socket.send({ t: 'banCards', cardKeys: [...draftBans] })) setMessage('连接已断开，BAN 没有送达')
-  }
+  }, [draftBans, socket])
+
+  const toggleDraftSelection = useCallback(
+    (cardKey: string) => toggleDraftCard(cardKey, DRAFT_SELECTION_SIZE, setDraftSelection),
+    [toggleDraftCard],
+  )
+  const toggleDraftBan = useCallback(
+    (cardKey: string) => toggleDraftCard(cardKey, BAN_SIZE, setDraftBans),
+    [toggleDraftCard],
+  )
 
   const togglePinned = useCallback((cardKey: string) => {
     setPinnedKeys((previous) => {
@@ -1582,7 +1591,7 @@ export function OnlinePage() {
           opponentCount={room.draft.opponentSelectedCount}
           opponentLabel="对手已选"
           submitLabel="确认 30 张并进入互换"
-          onToggle={(key) => toggleDraftCard(key, DRAFT_SELECTION_SIZE, setDraftSelection)}
+          onToggle={toggleDraftSelection}
           onSubmit={submitDraftSelection}
         />
         {message ? <div className="toast">{message}</div> : null}
@@ -1612,7 +1621,7 @@ export function OnlinePage() {
           opponentCount={room.draft.opponentBannedCount}
           opponentLabel="对手已 BAN"
           submitLabel="确认 BAN 5 张并进入排牌"
-          onToggle={(key) => toggleDraftCard(key, BAN_SIZE, setDraftBans)}
+          onToggle={toggleDraftBan}
           onSubmit={submitDraftBan}
         />
         {message ? <div className="toast">{message}</div> : null}
@@ -1620,45 +1629,29 @@ export function OnlinePage() {
     )
   }
 
-  if (room.phase === 'over' || matchOver) {
-    const scores = matchOver?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
-    const winner = matchOver ? matchOver.winner : room.matchWinner
-    return (
-      <div className="online-page">
-        <section className="hero">
-          <h1>本局结束</h1>
-          <p>{winner ? `${room.players[winner]?.nickname || winner} 获胜` : '双方平手'}</p>
-        </section>
-        <section className="panel stack result-panel">
-          <div className="versus-players">
-            <ScoreCard player={room.players.A} score={scores.A} winner={winner === 'A'} />
-            <span className="versus-mark">—</span>
-            <ScoreCard player={room.players.B} score={scores.B} winner={winner === 'B'} />
-          </div>
-          <p className="muted small">完成 {matchOver?.rounds || room.roundNo} 回合</p>
-          <button className="btn btn-primary btn-lg" type="button" onClick={leaveRoom}>返回在线大厅</button>
-        </section>
-        {message ? <div className="toast">{message}</div> : null}
-      </div>
-    )
-  }
-
   const resultMeta = lastResult?.cardKey ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
-  const scores = lastResult?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
+  const scores = matchOver?.scores || lastResult?.scores || { A: room.players.A?.score || 0, B: room.players.B?.score || 0 }
+  const matchIsOver = room.phase === 'over' || Boolean(matchOver)
+  const matchWinner = matchOver?.winner || room.matchWinner || null
+  const matchRounds = matchOver?.rounds || room.roundNo
   const isOpeningArrange = room.phase === 'arrange'
-  const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer)
+  const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer && !matchIsOver)
   const restSeconds = Math.ceil(restRemaining / 1000)
   const arrangeReadySeconds = Math.ceil(arrangeReadyRemaining / 1000)
   const restReadySeconds = Math.ceil(restReadyRemaining / 1000)
   const readyRemaining = isOpeningArrange ? arrangeReadyRemaining : restReadyRemaining
   const readySeconds = isOpeningArrange ? arrangeReadySeconds : restReadySeconds
-  const stageLabel = isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
-  const isReadyWindow = isOpeningArrange || isResting
+  const stageLabel = matchIsOver ? '本局结束' : isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
+  const isReadyWindow = !matchIsOver && (isOpeningArrange || isResting)
   const restReady = Boolean(me?.restReady)
   const opponentRestReady = Boolean(opponent?.restReady)
   const windowReady = isOpeningArrange ? Boolean(me?.arrangeReady) : restReady
   const opponentWindowReady = isOpeningArrange ? Boolean(opponent?.arrangeReady) : opponentRestReady
-  const statusText = isOpeningArrange
+  const statusText = matchIsOver
+    ? matchWinner
+      ? `${room.players[matchWinner]?.nickname || matchWinner} 获胜 · 对局已结束，最终牌区已保留`
+      : '双方平手 · 对局已结束，最终牌区已保留'
+    : isOpeningArrange
     ? arrangeReadyRemaining > 0
       ? `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
       : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
@@ -1687,15 +1680,23 @@ export function OnlinePage() {
       <section className="hero">
         <div className="row spread">
           <div>
-            <h1>{isOpeningArrange ? '开局排牌准备' : '歌牌对战进行中'}</h1>
+            <h1>{matchIsOver ? '歌牌对战复盘' : isOpeningArrange ? '开局排牌准备' : '歌牌对战进行中'}</h1>
             <p>
-              {isOpeningArrange
+              {matchIsOver
+                ? `对局已结束 · 第 ${matchRounds} 回合 · 最终牌区已保留`
+                : isOpeningArrange
                 ? `剩余 ${Math.ceil(arrangeRemaining / 1000)} 秒完成自己的牌区布局 · ${ownHandKeys.length} 张手牌`
                 : `第 ${room.roundNo || round?.roundNo || 0} 回合 · 场上实牌 ${room.remainingCardKeys.length} 张`}
             </p>
           </div>
           <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
         </div>
+        {matchIsOver ? (
+          <div className="status-banner online-match-review-banner" role="status">
+            <strong>本局已结束，当前保留最终棋盘供复盘</strong>
+            <span>{matchWinner ? `${room.players[matchWinner]?.nickname || matchWinner} 获胜` : '双方平手'} · 共 {matchRounds} 回合</span>
+          </div>
+        ) : null}
       </section>
 
       <section className="panel stack online-game-panel">
@@ -1708,7 +1709,7 @@ export function OnlinePage() {
             <span className={`connection-chip${connected ? ' online' : ''}`}>
               {connected ? '连接稳定' : '正在重连…'}
             </span>
-            <span className="chip">{round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
+            <span className="chip">{matchIsOver ? '本局结束' : round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
             <div className="online-style-switch" role="group" aria-label="对战视图">
               <span className="online-style-caption">视图</span>
               <button
@@ -1786,7 +1787,9 @@ export function OnlinePage() {
             <section className={`online-sidebar-card online-phase-panel${isResting ? ' resting' : ''}${readyRemaining > 0 ? ' ready-countdown' : ''}`} role="status" aria-live="polite">
               <span className="online-phase-label">{stageLabel}</span>
               <strong className="online-phase-count">
-                {isOpeningArrange
+                {matchIsOver
+                  ? '—'
+                  : isOpeningArrange
                   ? `${arrangeReadyRemaining > 0 ? arrangeReadySeconds : Math.ceil(arrangeRemaining / 1000)} 秒`
                   : isResting
                     ? `${restReadyRemaining > 0 ? restReadySeconds : restSeconds} 秒`
@@ -1850,7 +1853,7 @@ export function OnlinePage() {
         </div>
       </section>
 
-      {lastResult && !matchOver ? (
+      {lastResult && !matchIsOver ? (
         <div className="online-result-overlay" aria-live="polite">
             <section key={`result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
               <div className="row spread">
@@ -1884,6 +1887,26 @@ export function OnlinePage() {
                 </div>
               )}
             </section>
+        </div>
+      ) : null}
+      {matchIsOver ? (
+        <div className="online-result-overlay online-match-over-overlay" aria-live="polite">
+          <section
+            key={`match-over-${matchRounds}-${matchWinner || 'draw'}`}
+            className="panel cool online-result online-modal-card online-match-over-card"
+            role="status"
+          >
+            <div className="row spread">
+              <strong>{matchWinner ? `${room.players[matchWinner]?.nickname || matchWinner} 获胜` : '双方平手'}</strong>
+              <span className="muted small">对局结束 · {matchRounds} 回合</span>
+            </div>
+            <div className="versus-players">
+              <ScoreCard player={room.players.A} score={scores.A} winner={matchWinner === 'A'} mine={room.you === 'A'} />
+              <span className="versus-mark">VS</span>
+              <ScoreCard player={room.players.B} score={scores.B} winner={matchWinner === 'B'} mine={room.you === 'B'} />
+            </div>
+            <p className="muted small online-match-over-note">最终牌区已保留，可继续查看双方布局与剩余牌。点击上方“退出本局”返回在线大厅。</p>
+          </section>
         </div>
       ) : null}
       <BattleAnimationOverlay event={battleAnimation} room={room} />
@@ -2254,6 +2277,19 @@ function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: Virtual
   )
 }
 
+const DraftCard = memo(function DraftCard({
+  meta,
+  selected,
+  onToggle,
+}: {
+  meta: OnlineCardView
+  selected: boolean
+  onToggle: (cardKey: string) => void
+}) {
+  const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
+  return <OnlineCardTile meta={meta} available picked={selected} onClick={handleClick} />
+})
+
 interface DraftCardPickerProps {
   title: string
   description: string
@@ -2294,13 +2330,7 @@ function DraftCardPicker({
       </div>
       <div className="draft-card-grid">
         {cards.map((meta) => (
-          <OnlineCardTile
-            key={meta.key}
-            meta={meta}
-            available
-            picked={selected.has(meta.key)}
-            onClick={() => onToggle(meta.key)}
-          />
+          <DraftCard key={meta.key} meta={meta} selected={selected.has(meta.key)} onToggle={onToggle} />
         ))}
       </div>
       {!cards.length ? <div className="empty-state">正在等待服务器下发本阶段牌池…</div> : null}
