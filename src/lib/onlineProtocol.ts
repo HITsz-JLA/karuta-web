@@ -69,6 +69,7 @@ export interface OnlineRoomView {
   packageId: string
   deckName: string
   you: OnlinePlayerId
+  spectator: boolean
   phase: OnlineRoomPhase
   players: Record<OnlinePlayerId, OnlinePlayerView | null>
   cards: OnlineCardView[]
@@ -104,6 +105,7 @@ export type OnlineClientMessage =
       cardKeys: string[]
     }
   | { t: 'joinRoom'; code: string; nickname: string }
+  | { t: 'spectateRoom'; code: string }
   | { t: 'ready'; ready: boolean }
   | { t: 'selectCards'; cardKeys: string[] }
   | { t: 'banCards'; cardKeys: string[] }
@@ -134,7 +136,7 @@ export interface OnlineRoundResult {
 }
 
 export type OnlineServerMessage =
-  | { t: 'welcome'; resumed: boolean; resumeToken?: string }
+  | { t: 'welcome'; resumed: boolean; resumeToken?: string; resumeRejected?: boolean }
   | { t: 'room'; room: OnlineRoomView }
   | { t: 'roomList'; rooms: OnlineRoomSummary[] }
   | OnlineRoundStart

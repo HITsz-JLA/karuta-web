@@ -1,10 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type DragEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { OnlineCardTile } from '../components/OnlineCardTile'
 import {
   type OnlineCardView,
-  type OnlineFairnessView,
   type OnlineNetworkView,
+  type OnlinePlayerId,
   type OnlineRoomSummary,
   type OnlineRoundResult,
   type OnlineRoundStart,
@@ -34,10 +34,8 @@ const ONLINE_CLOCK_TICK_MS = 250
 
 type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
 type BattleStyle = 'text' | 'card'
-type OnlineNetworkDelta = Extract<OnlineServerMessage, { t: 'network' }>
 
 const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
-const EMPTY_NETWORK_VIEW: OnlineNetworkView = { rttMs: null, jitterMs: null, samples: 0 }
 
 function setCountdownRemaining(setter: Dispatch<SetStateAction<number>>, nextValue: number) {
   const next = Math.max(0, nextValue)
@@ -85,6 +83,16 @@ interface ClaimState {
   correct: boolean | null
 }
 
+type BattleAnimation =
+  | { id: number; kind: 'wrong'; playerId: OnlinePlayerId; cardKey: string }
+  | { id: number; kind: 'transfer'; from: OnlinePlayerId; to: OnlinePlayerId; cardKey: string; automatic: boolean }
+  | { id: number; kind: 'layout'; playerId: OnlinePlayerId; cardKey: string; targetSlot: number | null }
+
+type BattleAnimationPayload =
+  | Omit<Extract<BattleAnimation, { kind: 'wrong' }>, 'id'>
+  | Omit<Extract<BattleAnimation, { kind: 'transfer' }>, 'id'>
+  | Omit<Extract<BattleAnimation, { kind: 'layout' }>, 'id'>
+
 function readNickname() {
   try {
     return localStorage.getItem('karuta-online-nickname') || '玩家'
@@ -107,7 +115,7 @@ function otherPlayer(player: 'A' | 'B') {
   return player === 'A' ? 'B' : 'A'
 }
 
-function mirrorBoardLayout(layout: Array<string | null> | null, fallback: string[]) {
+function normalizeBoardLayout(layout: Array<string | null> | null, fallback: string[]) {
   const hand = new Set(fallback)
   const used = new Set<string>()
   const source = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => {
@@ -121,6 +129,11 @@ function mirrorBoardLayout(layout: Array<string | null> | null, fallback: string
   for (let index = 0; index < source.length && nextUnplaced < unplaced.length; index += 1) {
     if (source[index] === null) source[index] = unplaced[nextUnplaced++]
   }
+  return source
+}
+
+function mirrorBoardLayout(layout: Array<string | null> | null, fallback: string[]) {
+  const source = normalizeBoardLayout(layout, fallback)
   const mirrored = Array<string | null>(MAX_HAND_SLOTS).fill(null)
   for (let row = 0; row < 3; row += 1) {
     for (let column = 0; column < 11; column += 1) {
@@ -132,32 +145,6 @@ function mirrorBoardLayout(layout: Array<string | null> | null, fallback: string
 
 function formatNetworkMetric(value: number | null) {
   return value === null ? '测量中' : `${value} ms`
-}
-
-function sameNetworkView(left: OnlineNetworkView, right: OnlineNetworkView) {
-  return left.rttMs === right.rttMs && left.jitterMs === right.jitterMs && left.samples === right.samples
-}
-
-function sameFairnessView(left: OnlineFairnessView, right: OnlineFairnessView) {
-  return (
-    left.status === right.status &&
-    left.canStart === right.canStart &&
-    left.rttGapMs === right.rttGapMs &&
-    left.jitterGapMs === right.jitterGapMs &&
-    left.maxJitterMs === right.maxJitterMs &&
-    left.message === right.message
-  )
-}
-
-function networkDeltaFromRoom(room: OnlineRoomView): OnlineNetworkDelta {
-  return {
-    t: 'network',
-    players: {
-      A: room.players.A?.network || EMPTY_NETWORK_VIEW,
-      B: room.players.B?.network || EMPTY_NETWORK_VIEW,
-    },
-    fairness: room.fairness,
-  }
 }
 
 export function OnlinePage() {
@@ -186,7 +173,6 @@ export function OnlinePage() {
   const selectedPackage = onlinePackages.find(({ serverPackage }) => serverPackage.id === activePackageId) || null
   const [room, setRoom] = useState<OnlineRoomView | null>(null)
   const [rooms, setRooms] = useState<OnlineRoomSummary[]>([])
-  const [networkDelta, setNetworkDelta] = useState<OnlineNetworkDelta | null>(null)
   const [nickname, setNickname] = useState(readNickname)
   const [roomName, setRoomName] = useState('校园歌牌房间')
   const [joinCode, setJoinCode] = useState('')
@@ -196,6 +182,7 @@ export function OnlinePage() {
   const [round, setRound] = useState<OnlineRoundStart | null>(null)
   const [lastResult, setLastResult] = useState<OnlineRoundResult | null>(null)
   const [matchOver, setMatchOver] = useState<Extract<OnlineServerMessage, { t: 'matchOver' }> | null>(null)
+  const [battleAnimation, setBattleAnimation] = useState<BattleAnimation | null>(null)
   const [myClaim, setMyClaim] = useState<ClaimState | null>(null)
   const [opponentClaim, setOpponentClaim] = useState<ClaimState | null>(null)
   const [roundRemaining, setRoundRemaining] = useState(0)
@@ -213,6 +200,8 @@ export function OnlinePage() {
   const audioUnlockingRef = useRef(false)
   const audioGenerationRef = useRef(0)
   const audioRetryTimerRef = useRef<number | null>(null)
+  const battleAnimationIdRef = useRef(0)
+  const battleAnimationTimerRef = useRef<number | null>(null)
   const [boardSlots, setBoardSlots] = useState<Array<string | null>>(() => Array(MAX_HAND_SLOTS).fill(null))
   const [draggingKey, setDraggingKey] = useState<string | null>(null)
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null)
@@ -235,6 +224,25 @@ export function OnlinePage() {
   const ownHandSignature = ownHandKeys.join('\u0000')
   const roundRef = useRef<OnlineRoundStart | null>(round)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
+
+  const showBattleAnimation = useCallback((payload: BattleAnimationPayload) => {
+    const id = battleAnimationIdRef.current + 1
+    battleAnimationIdRef.current = id
+    setBattleAnimation({ ...payload, id } as BattleAnimation)
+  }, [])
+
+  useEffect(() => {
+    if (!battleAnimation) return
+    if (battleAnimationTimerRef.current !== null) window.clearTimeout(battleAnimationTimerRef.current)
+    battleAnimationTimerRef.current = window.setTimeout(() => {
+      battleAnimationTimerRef.current = null
+      setBattleAnimation(null)
+    }, 2_400)
+    return () => {
+      if (battleAnimationTimerRef.current !== null) window.clearTimeout(battleAnimationTimerRef.current)
+      battleAnimationTimerRef.current = null
+    }
+  }, [battleAnimation])
 
   useEffect(() => {
     roundRef.current = round
@@ -339,21 +347,24 @@ export function OnlinePage() {
           break
         case 'room':
           const previousPhase = phaseRef.current
+          const previousRoom = roomRef.current
+          for (const playerId of ['A', 'B'] as const) {
+            const before = previousRoom?.players[playerId]?.layoutCardKeys
+            const after = incoming.room.players[playerId]?.layoutCardKeys
+            if (!before || !after || before.length !== after.length) continue
+            const changedIndex = after.findIndex((key, index) => key !== before[index] && key)
+            if (changedIndex >= 0) {
+              showBattleAnimation({
+                kind: 'layout',
+                playerId,
+                cardKey: after[changedIndex] || before[changedIndex] || '',
+                targetSlot: changedIndex,
+              })
+            }
+          }
           phaseRef.current = incoming.room.phase
           roomRef.current = incoming.room
           setRoom(incoming.room)
-          const nextNetworkDelta = networkDeltaFromRoom(incoming.room)
-          setNetworkDelta((previous) => {
-            if (
-              previous &&
-              sameNetworkView(previous.players.A, nextNetworkDelta.players.A) &&
-              sameNetworkView(previous.players.B, nextNetworkDelta.players.B) &&
-              sameFairnessView(previous.fairness, nextNetworkDelta.fairness)
-            ) {
-              return previous
-            }
-            return nextNetworkDelta
-          })
           if (previousPhase === 'arrange' && incoming.room.phase !== 'arrange') {
             draggingKeyRef.current = null
             dragOverSlotRef.current = null
@@ -374,17 +385,6 @@ export function OnlinePage() {
           }
           break
         case 'network':
-          setNetworkDelta((previous) => {
-            if (
-              previous &&
-              sameNetworkView(previous.players.A, incoming.players.A) &&
-              sameNetworkView(previous.players.B, incoming.players.B) &&
-              sameFairnessView(previous.fairness, incoming.fairness)
-            ) {
-              return previous
-            }
-            return incoming
-          })
           break
         case 'peer':
           setRoom((previous) => {
@@ -417,6 +417,9 @@ export function OnlinePage() {
           } else {
             setOpponentClaim({ cardKey: incoming.cardKey, correct: incoming.correct })
           }
+          if (!incoming.correct) {
+            showBattleAnimation({ kind: 'wrong', playerId: incoming.playerId, cardKey: incoming.cardKey })
+          }
           if (!incoming.correct) setRound(null)
           break
         case 'cardTransfer':
@@ -431,6 +434,13 @@ export function OnlinePage() {
                 ? '已自动向对手转牌'
                 : '已向对手转牌',
           )
+          showBattleAnimation({
+            kind: 'transfer',
+            from: incoming.from,
+            to: incoming.to,
+            cardKey: incoming.cardKey,
+            automatic: Boolean(incoming.automatic),
+          })
           break
         case 'roundResult':
           setLastResult(incoming)
@@ -444,6 +454,17 @@ export function OnlinePage() {
           break
         case 'error':
           setMessage(incoming.message)
+          if (incoming.code === 'room_closed' || incoming.code === 'spectate_unavailable') {
+            socket.clearResume()
+            phaseRef.current = null
+            roomRef.current = null
+            setRoom(null)
+            setRound(null)
+            setLastResult(null)
+            setMatchOver(null)
+            setBattleAnimation(null)
+            void socket.send({ t: 'listRooms' })
+          }
           break
         default:
           break
@@ -459,7 +480,7 @@ export function OnlinePage() {
       offStatus()
       socket.close()
     }
-  }, [socket])
+  }, [showBattleAnimation, socket])
 
   useEffect(() => {
     const audio = new Audio()
@@ -694,12 +715,13 @@ export function OnlinePage() {
     return room?.draft.exchangeCardKeys.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card)) || []
   }, [room?.draft.exchangeCardKeys, roomCards])
   const isResting = Boolean(room?.phase === 'playing' && restRemaining > 0 && !round && !matchOver)
+  const isGivingCard = Boolean(room?.pendingTransfer?.to === room?.you)
   const canArrange = Boolean(
-    ((room?.phase === 'arrange' && arrangeRemaining > 0) || isResting) && !matchOver && !round,
+    ((room?.phase === 'arrange' && arrangeRemaining > 0) || isResting) && !matchOver && !round && !room?.pendingTransfer && !room?.spectator,
   )
 
   useEffect(() => {
-    if (room?.phase !== 'playing') {
+    if (room?.phase !== 'playing' || room?.spectator) {
       publishedLayoutRoundRef.current = null
       return
     }
@@ -708,7 +730,7 @@ export function OnlinePage() {
     if (boardSlots.length !== MAX_HAND_SLOTS || boardSlots.filter(Boolean).length !== ownHandKeys.length) return
     if (!socket.send({ t: 'arrangeLayout', cardKeys: boardSlots })) return
     publishedLayoutRoundRef.current = layoutRevision
-  }, [boardSlots, ownHandKeys, room?.phase, room?.roundNo, round?.roundNo, socket])
+  }, [boardSlots, ownHandKeys, room?.phase, room?.roundNo, room?.spectator, round?.roundNo, socket])
 
   const createRoom = useCallback(async () => {
     if (!selectedPackage || !catalog) {
@@ -759,16 +781,34 @@ export function OnlinePage() {
     }
   }, [joinCode, nickname, socket])
 
+  const spectateRoom = useCallback(async (roomCode: string) => {
+    const code = roomCode.trim().toUpperCase()
+    if (!code) return
+    setBusy(true)
+    setMessage(null)
+    socket.clearResume()
+    socket.setSpectatorRoom(code)
+    try {
+      await socket.connect()
+      if (!socket.send({ t: 'spectateRoom', code })) throw new Error('在线连接已断开，请重试')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '进入观战失败')
+    } finally {
+      setBusy(false)
+    }
+  }, [socket])
+
   const leaveRoom = useCallback(() => {
     socket.send({ t: 'leaveRoom' })
     socket.clearResume()
+    socket.clearNetworkSnapshot()
     phaseRef.current = null
     roomRef.current = null
     setRoom(null)
-    setNetworkDelta(null)
     setRound(null)
     setLastResult(null)
     setMatchOver(null)
+    setBattleAnimation(null)
     setMyClaim(null)
     setOpponentClaim(null)
     setDraftSelection(new Set())
@@ -784,17 +824,25 @@ export function OnlinePage() {
     (sourceKey: string, targetSlot: number) => {
       if (!canArrange || !sourceKey) return
       const target = Math.max(0, Math.min(MAX_HAND_SLOTS - 1, Math.round(targetSlot)))
+      const sourceIndex = boardSlots.indexOf(sourceKey)
+      if (sourceIndex < 0 || sourceIndex === target) return
+      showBattleAnimation({
+        kind: 'layout',
+        playerId: roomRef.current?.you || 'A',
+        cardKey: sourceKey,
+        targetSlot: target,
+      })
       setBoardSlots((previous) => {
         const next = [...previous]
-        const sourceIndex = next.indexOf(sourceKey)
-        if (sourceIndex < 0 || sourceIndex === target) return previous
+        const currentIndex = next.indexOf(sourceKey)
+        if (currentIndex < 0 || currentIndex === target) return previous
         const displaced = next[target]
         next[target] = sourceKey
-        next[sourceIndex] = displaced && displaced !== sourceKey ? displaced : null
+        next[currentIndex] = displaced && displaced !== sourceKey ? displaced : null
         return next
       })
     },
-    [canArrange],
+    [boardSlots, canArrange, showBattleAnimation],
   )
 
   const cancelPointerFrame = useCallback(() => {
@@ -875,7 +923,7 @@ export function OnlinePage() {
 
   const handlePointerDown = useCallback(
     (event: PointerEvent<HTMLButtonElement>, cardKey: string) => {
-      if (!canArrange) return
+      if (!canArrange || event.pointerType === 'touch') return
       event.preventDefault()
       draggingKeyRef.current = cardKey
       dragOverSlotRef.current = Math.max(0, boardSlots.indexOf(cardKey))
@@ -888,7 +936,7 @@ export function OnlinePage() {
 
   const handlePointerMove = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
-      if (!canArrange || !draggingKeyRef.current) return
+      if (!canArrange || event.pointerType === 'touch' || !draggingKeyRef.current) return
       pointerPositionRef.current = { clientX: event.clientX, clientY: event.clientY }
       if (pointerFrameRef.current !== null) return
       pointerFrameRef.current = window.requestAnimationFrame(() => {
@@ -903,6 +951,7 @@ export function OnlinePage() {
 
   const handlePointerUp = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === 'touch') return
       if (canArrange && draggingKeyRef.current && dragOverSlotRef.current !== null) {
         cancelPointerFrame()
         updateDragOverSlot(event.clientX, event.clientY)
@@ -916,10 +965,40 @@ export function OnlinePage() {
 
   const handlePointerCancel = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === 'touch') return
       clearDrag()
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     },
     [clearDrag],
+  )
+
+  const selectArrangeCard = useCallback(
+    (cardKey: string) => {
+      if (!canArrange || pinMode) return
+      const slotIndex = boardSlots.indexOf(cardKey)
+      if (slotIndex < 0) return
+      if (draggingKeyRef.current === cardKey) {
+        clearDrag()
+        return
+      }
+      cancelPointerFrame()
+      draggingKeyRef.current = cardKey
+      dragOverSlotRef.current = slotIndex
+      setDraggingKey(cardKey)
+      setDragOverSlot(slotIndex)
+    },
+    [boardSlots, canArrange, cancelPointerFrame, clearDrag, pinMode],
+  )
+
+  const handleArrangeSlotClick = useCallback(
+    (targetSlot: number) => {
+      if (!canArrange) return
+      const sourceKey = draggingKeyRef.current
+      if (!sourceKey) return
+      moveCardToSlot(sourceKey, targetSlot)
+      clearDrag()
+    },
+    [canArrange, clearDrag, moveCardToSlot],
   )
 
   const toggleSelected = useCallback((cardKey: string) => {
@@ -1020,6 +1099,19 @@ export function OnlinePage() {
   const giveCard = useCallback((cardKey: string) => {
     if (!socket.send({ t: 'giveCard', cardKey })) setMessage('连接已断开，转牌没有送达')
   }, [socket])
+
+  const handleOwnCardClick = useCallback((cardKey: string) => {
+    if (isGivingCard) {
+      giveCard(cardKey)
+      return
+    }
+    if (canArrange) {
+      if (pinMode) togglePinned(cardKey)
+      else selectArrangeCard(cardKey)
+      return
+    }
+    claimCard(cardKey)
+  }, [canArrange, claimCard, giveCard, isGivingCard, pinMode, selectArrangeCard, togglePinned])
 
   function toggleReady() {
     if (!room || (!isOpeningArrange && !isResting) || room.pendingTransfer) return
@@ -1216,12 +1308,19 @@ export function OnlinePage() {
             <div className="room-list">
               {!rooms.length ? <div className="empty-state">暂时没有公开房间</div> : null}
               {rooms.map((item) => (
-                <button key={item.code} type="button" className="room-list-item" onClick={() => setJoinCode(item.code)}>
+                <button
+                  key={item.code}
+                  type="button"
+                  className={`room-list-item${item.status === 'playing' ? ' spectateable' : ''}`}
+                  onClick={() => (item.status === 'playing' ? void spectateRoom(item.code) : setJoinCode(item.code))}
+                  disabled={busy}
+                  aria-label={item.status === 'playing' ? `观战 ${item.name}` : `填写房间码 ${item.name}`}
+                >
                   <span>
                     <strong>{item.name}</strong>
-                    <span className="muted small">{item.deckName} · {item.players}/2 人</span>
+                    <span className="muted small">{item.deckName} · {item.players}/2 人 · {item.status === 'playing' ? '对局进行中，点击观战' : item.status === 'full' ? '等待加入' : '等待对手'}</span>
                   </span>
-                  <span className="room-code">{item.code}</span>
+                  <span className={`room-code${item.status === 'playing' ? ' spectate-label' : ''}`}>{item.status === 'playing' ? '观战' : item.code}</span>
                 </button>
               ))}
             </div>
@@ -1246,6 +1345,29 @@ export function OnlinePage() {
     )
   }
 
+  if (room.spectator) {
+    return (
+      <SpectatorMatchView
+        room={room}
+        round={round}
+        lastResult={lastResult}
+        claims={{ A: room.you === 'A' ? myClaim : opponentClaim, B: room.you === 'B' ? myClaim : opponentClaim }}
+        battleAnimation={battleAnimation}
+        connected={connected}
+        restRemaining={restRemaining}
+        roundRemaining={roundRemaining}
+        arrangeRemaining={arrangeRemaining}
+        battleStyle={battleStyle}
+        onBattleStyle={setBattleStyle}
+        onLeave={leaveRoom}
+        socket={socket}
+        audioButtonLabel={audioButtonLabel}
+        onUnlockAudio={unlockAudio}
+        matchOver={matchOver}
+      />
+    )
+  }
+
   if (room.phase === 'lobby') {
     const ready = Boolean(me?.ready)
     return (
@@ -1267,7 +1389,7 @@ export function OnlinePage() {
             <span className="versus-mark">VS</span>
             <PlayerBadge player={room.players.B} mine={room.you === 'B'} />
           </div>
-          <NetworkFairness you={room.you} network={networkDelta} />
+          <NetworkFairness socket={socket} you={room.you} />
           <div className="online-board compact">
             {orderedRoomCards.map((meta) => (
               <OnlineCardTile key={meta.key} meta={meta} available={false} />
@@ -1275,9 +1397,7 @@ export function OnlinePage() {
           </div>
           <div className="row spread">
              <span className="muted small">候选牌 {room.cards.length} 张 · 准备后进入选牌、互换和 BAN</span>
-            <button className="btn btn-primary btn-lg" type="button" disabled={!opponent || !(networkDelta?.fairness.canStart ?? room.fairness.canStart)} onClick={() => socket.send({ t: 'ready', ready: !ready })}>
-              {ready ? '取消准备' : '准备开始'}
-            </button>
+            <OnlineLobbyReadyButton socket={socket} room={room} opponent={opponent} ready={ready} />
           </div>
         </section>
         {message ? <div className="toast">{message}</div> : null}
@@ -1378,7 +1498,6 @@ export function OnlinePage() {
   const readyRemaining = isOpeningArrange ? arrangeReadyRemaining : restReadyRemaining
   const readySeconds = isOpeningArrange ? arrangeReadySeconds : restReadySeconds
   const stageLabel = isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
-  const isGivingCard = Boolean(room.pendingTransfer?.to === room.you)
   const isReadyWindow = isOpeningArrange || isResting
   const restReady = Boolean(me?.restReady)
   const opponentRestReady = Boolean(opponent?.restReady)
@@ -1431,6 +1550,9 @@ export function OnlinePage() {
             <span className="muted small">服务器歌牌卡面 · 牌位调整只保留在自己的视角</span>
           </div>
           <div className="online-game-header-tools">
+            <span className={`connection-chip${connected ? ' online' : ''}`}>
+              {connected ? '连接稳定' : '正在重连…'}
+            </span>
             <span className="chip">{round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
             <div className="online-style-switch" role="group" aria-label="对战视图">
               <span className="online-style-caption">视图</span>
@@ -1460,6 +1582,7 @@ export function OnlinePage() {
               slotCards={opponentHandCards}
               claimable={canClaim}
               resultKey={lastResult?.cardKey || null}
+              wrongKey={opponentClaim?.correct === false ? opponentClaim.cardKey : null}
               pickedKey={opponentClaim?.cardKey || null}
               onCardClick={claimCard}
             />
@@ -1480,16 +1603,18 @@ export function OnlinePage() {
               claimable={canClaim}
               giving={isGivingCard}
               resultKey={lastResult?.cardKey || null}
+              wrongKey={myClaim?.correct === false ? myClaim.cardKey : null}
               pickedKey={myClaim?.cardKey || null}
-              onCardClick={isGivingCard ? giveCard : pinMode && canArrange ? togglePinned : claimCard}
+              onCardClick={handleOwnCardClick}
+              onSlotClick={handleArrangeSlotClick}
               onDragStart={handleDragStart}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
               onDragEnd={handleDragEnd}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerCancel}
+              onPointerDown={canArrange ? handlePointerDown : undefined}
+              onPointerMove={canArrange ? handlePointerMove : undefined}
+              onPointerUp={canArrange ? handlePointerUp : undefined}
+              onPointerCancel={canArrange ? handlePointerCancel : undefined}
             />
           </div>
           <aside className="online-match-sidebar" aria-label="对局信息">
@@ -1557,7 +1682,7 @@ export function OnlinePage() {
                 {pinMode ? <span className="muted small">点击自己的牌固定/取消固定，再使用排序按钮。</span> : null}
               </section>
             ) : null}
-            <NetworkFairness you={room.you} network={networkDelta} compact />
+            <NetworkFairness socket={socket} you={room.you} compact />
             <div className="online-audio-control">
               <button className="btn btn-secondary online-audio-button" type="button" onClick={unlockAudio}>{audioButtonLabel}</button>
               {audioStatus === 'blocked' ? <span className="online-audio-status error" role="alert">浏览器拦截了自动播放，请点击按钮恢复音频。</span> : null}
@@ -1585,7 +1710,10 @@ export function OnlinePage() {
               </div>
               {resultMeta ? (
                 <div className="online-result-body">
-                  <OnlineCardTile meta={resultMeta} available result showNumber={false} />
+                  <div className={`online-discard-flight${lastResult.winner ? ` winner-${lastResult.winner}` : ''}`}>
+                    <OnlineCardTile meta={resultMeta} available result readOnly showNumber={false} />
+                    <span className="online-discard-pile">{lastResult.winner ? `${room.players[lastResult.winner]?.nickname || '玩家'} 的弃牌堆` : '场上'}</span>
+                  </div>
                   <div className="stack">
                     <span className="muted small">对应歌曲</span>
                     <strong>{lastResult.song.displayName}</strong>
@@ -1601,6 +1729,7 @@ export function OnlinePage() {
             </section>
         </div>
       ) : null}
+      <BattleAnimationOverlay event={battleAnimation} room={room} />
       {room.pendingTransfer ? (
         <div className="online-transfer-overlay" aria-live="polite">
           <TransferPanel room={room} />
@@ -1611,6 +1740,242 @@ export function OnlinePage() {
     </div>
   )
 }
+
+function handCardsForSpectator(room: OnlineRoomView, playerId: OnlinePlayerId) {
+  const player = room.players[playerId]
+  const handKeys = player?.handCardKeys || EMPTY_CARD_KEYS
+  const layout = player?.layoutCardKeys || null
+  const slotKeys = playerId === 'A' ? mirrorBoardLayout(layout, handKeys) : normalizeBoardLayout(layout, handKeys)
+  const byKey = new Map(room.cards.map((card) => [card.key, card]))
+  return slotKeys.map((key) => (key ? byKey.get(key) || null : null))
+}
+
+function playerName(room: OnlineRoomView, playerId: OnlinePlayerId) {
+  return room.players[playerId]?.nickname || `玩家 ${playerId}`
+}
+
+function BattleAnimationOverlay({ event, room }: { event: BattleAnimation | null; room: OnlineRoomView }) {
+  if (!event) return null
+  const card = room.cards.find((item) => item.key === event.cardKey)
+  if (!card) return null
+
+  const title =
+    event.kind === 'wrong'
+      ? `${playerName(room, event.playerId)} 选错了`
+      : event.kind === 'transfer'
+        ? `${playerName(room, event.from)} → ${playerName(room, event.to)} 交牌`
+        : `${playerName(room, event.playerId)} 调整牌位`
+  const detail =
+    event.kind === 'wrong'
+      ? '错误标记 · 目标牌仍留在场上'
+      : event.kind === 'transfer'
+        ? event.automatic
+          ? '超时自动交牌'
+          : '休息阶段交牌'
+        : event.targetSlot === null
+          ? '交换到新的位置'
+          : `放入第 ${event.targetSlot + 1} 个槽位`
+
+  return (
+    <div key={event.id} className={`online-battle-animation online-battle-animation-${event.kind} player-${event.kind === 'transfer' ? event.to : event.playerId}`} role="status" aria-live="polite">
+      <div className="online-battle-animation-card">
+        <strong>{title}</strong>
+        <OnlineCardTile meta={card} available={false} readOnly wrong={event.kind === 'wrong'} showNumber={false} />
+        <span>{detail}</span>
+      </div>
+    </div>
+  )
+}
+
+interface SpectatorMatchViewProps {
+  room: OnlineRoomView
+  round: OnlineRoundStart | null
+  lastResult: OnlineRoundResult | null
+  claims: Record<OnlinePlayerId, ClaimState | null>
+  battleAnimation: BattleAnimation | null
+  connected: boolean
+  restRemaining: number
+  roundRemaining: number
+  arrangeRemaining: number
+  battleStyle: BattleStyle
+  onBattleStyle: (style: BattleStyle) => void
+  onLeave: () => void
+  socket: OnlineSocket
+  audioButtonLabel: string
+  onUnlockAudio: () => void
+  matchOver: Extract<OnlineServerMessage, { t: 'matchOver' }> | null
+}
+
+const SpectatorMatchView = memo(function SpectatorMatchView({
+  room,
+  round,
+  lastResult,
+  claims,
+  battleAnimation,
+  connected,
+  restRemaining,
+  roundRemaining,
+  arrangeRemaining,
+  battleStyle,
+  onBattleStyle,
+  onLeave,
+  socket,
+  audioButtonLabel,
+  onUnlockAudio,
+  matchOver,
+}: SpectatorMatchViewProps) {
+  const topCards = useMemo(() => handCardsForSpectator(room, 'A'), [room])
+  const bottomCards = useMemo(() => handCardsForSpectator(room, 'B'), [room])
+  const phase = room.phase
+  const isPlaying = phase === 'playing'
+  const isResting = isPlaying && !round && restRemaining > 0 && !matchOver
+  const seconds = phase === 'arrange' ? Math.ceil(arrangeRemaining / 1000) : round ? Math.ceil(roundRemaining / 1000) : isResting ? Math.ceil(restRemaining / 1000) : 0
+  const stage = phase === 'arrange' ? '开局排牌' : round ? '听歌抢牌' : isResting ? '休息阶段' : phase === 'playing' ? '等待下一回合' : phase === 'over' || matchOver ? '对局结束' : '对局准备中'
+  const resultMeta = lastResult?.cardKey ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
+  const resultWinner = lastResult?.winner || null
+  const resultTitle = lastResult
+    ? lastResult.reason === 'wrong'
+      ? '选错处理完成，目标牌仍在场上'
+      : resultWinner
+        ? `${playerName(room, resultWinner)} 取到了牌`
+        : '本回合无人取牌'
+    : null
+
+  return (
+    <div className={`online-page online-match-page online-spectator-page online-style-${battleStyle}`}>
+      <section className="hero">
+        <div className="row spread">
+          <div>
+            <h1>观战 · {room.name}</h1>
+            <p>{room.deckName} · 房间码 <span className="room-code">{room.code}</span></p>
+          </div>
+          <div className="online-spectator-actions">
+            <span className={`connection-chip${connected ? ' online' : ''}`}>{connected ? '观战连接稳定' : '正在重连…'}</span>
+            <button className="btn btn-secondary" type="button" onClick={onLeave}>退出观战</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel stack online-game-panel online-spectator-panel">
+        <div className="online-game-header">
+          <div className="online-game-heading">
+            <strong>歌牌对战 · 观战视角</strong>
+            <span className="muted small">只读模式 · 双方操作、取错标记与交牌动画都会同步显示</span>
+          </div>
+          <div className="online-game-header-tools">
+            <span className="chip">{room.players.A?.connected && room.players.B?.connected ? '双方在线' : '有玩家断线'}</span>
+            <div className="online-style-switch" role="group" aria-label="观战视图">
+              <span className="online-style-caption">视图</span>
+              <button className={`online-style-button${battleStyle === 'text' ? ' active' : ''}`} type="button" aria-pressed={battleStyle === 'text'} onClick={() => onBattleStyle('text')}>文字注重</button>
+              <button className={`online-style-button${battleStyle === 'card' ? ' active' : ''}`} type="button" aria-pressed={battleStyle === 'card'} onClick={() => onBattleStyle('card')}>卡面注重</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="online-spectator-scoreboard" aria-label="双方剩余牌数">
+          <div className="online-spectator-player player-a">
+            <span>{playerName(room, 'A')}</span>
+            <strong>{room.players.A?.handCardKeys.length || 0}</strong>
+            <small>张牌 · 上方</small>
+          </div>
+          <div className={`online-spectator-stage${isResting ? ' resting' : ''}`} role="status" aria-live="polite">
+            <span>{stage}</span>
+            <strong>{seconds ? `${seconds}s` : '—'}</strong>
+            <small>{room.remainingCardKeys.length} 张场上牌</small>
+          </div>
+          <div className="online-spectator-player player-b">
+            <span>{playerName(room, 'B')}</span>
+            <strong>{room.players.B?.handCardKeys.length || 0}</strong>
+            <small>张牌 · 下方</small>
+          </div>
+        </div>
+
+        {phase !== 'playing' && phase !== 'over' ? (
+          <div className="online-spectator-waiting" role="status">
+            <strong>{stage}</strong>
+            <span>观战画面会在正式回合开始后显示双方的完整牌区。</span>
+            <div className="online-spectator-progress">
+              <span>A：{room.draft.selectedCardKeys.length}/30 已选 · {room.draft.bannedCardKeys.length}/5 BAN</span>
+              <span>B：{room.draft.opponentSelectedCount}/30 已选 · {room.draft.opponentBannedCount}/5 BAN</span>
+            </div>
+          </div>
+        ) : (
+          <div className="online-spectator-board">
+            <HandArea
+              title={`${playerName(room, 'A')} · 上方牌区 · ${room.players.A?.handCardKeys.length || 0}/33`}
+              slotCards={topCards}
+              spectator
+              wrongKey={claims.A?.correct === false ? claims.A.cardKey : null}
+              pickedKey={claims.A?.cardKey || null}
+            />
+            <div className="online-board-divider online-spectator-divider" aria-hidden="true">
+              <span />
+              <div className="online-divider-scores">
+                <div><strong>{room.players.A?.score || 0}</strong><span>{playerName(room, 'A')}</span></div>
+                <strong className="versus-mark">VS</strong>
+                <div><span>{playerName(room, 'B')}</span><strong>{room.players.B?.score || 0}</strong></div>
+              </div>
+              <div className="online-match-status"><strong>{stage}</strong><span>{seconds ? `${seconds} 秒` : '等待服务器结算'}</span></div>
+              <span />
+            </div>
+            <HandArea
+              title={`${playerName(room, 'B')} · 下方牌区 · ${room.players.B?.handCardKeys.length || 0}/33`}
+              slotCards={bottomCards}
+              mine
+              spectator
+              wrongKey={claims.B?.correct === false ? claims.B.cardKey : null}
+              pickedKey={claims.B?.cardKey || null}
+            />
+          </div>
+        )}
+
+        <aside className="online-spectator-sidebar" aria-label="观战信息">
+          <section className="online-sidebar-card online-count-panel online-spectator-count-panel">
+            <strong>剩余牌数</strong>
+            <span className="player-a-count">{playerName(room, 'A')} <b>{room.players.A?.handCardKeys.length || 0}</b></span>
+            <span className="player-b-count">{playerName(room, 'B')} <b>{room.players.B?.handCardKeys.length || 0}</b></span>
+            <span>场上实体牌 <b>{room.remainingCardKeys.length}</b></span>
+          </section>
+          <NetworkFairness socket={socket} you="A" compact />
+          <div className="online-audio-control">
+            <button className="btn btn-secondary online-audio-button" type="button" onClick={onUnlockAudio}>{audioButtonLabel}</button>
+          </div>
+        </aside>
+      </section>
+
+      {battleAnimation ? <BattleAnimationOverlay event={battleAnimation} room={room} /> : null}
+      {lastResult ? (
+        <div className="online-result-overlay" aria-live="polite">
+          <section key={`spectator-result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
+            <div className="row spread">
+              <strong>{resultTitle}</strong>
+              <span className="muted small">{lastResult.reason === 'timeout' ? '时间到' : lastResult.reason === 'wrong' ? '选错' : '本回合结算'}</span>
+            </div>
+            {resultMeta ? (
+              <div className="online-result-body">
+                <div className={`online-discard-flight${resultWinner ? ` winner-${resultWinner}` : ''}`}>
+                  <OnlineCardTile meta={resultMeta} available result readOnly showNumber={false} />
+                  <span className="online-discard-pile">{resultWinner ? `${playerName(room, resultWinner)} 的弃牌堆` : '场上'}</span>
+                </div>
+                <div className="stack">
+                  <span className="muted small">对应歌曲</span>
+                  <strong>{lastResult.song.displayName}</strong>
+                  <span className="muted small">观战者不能操作牌面。</span>
+                </div>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+      {matchOver ? (
+        <div className="online-spectator-over" role="status">
+          <strong>{matchOver.winner ? `${playerName(room, matchOver.winner)} 获胜` : '双方平手'}</strong>
+          <span>对局已结束 · {matchOver.rounds} 回合</span>
+        </div>
+      ) : null}
+    </div>
+  )
+})
 
 interface VirtualServerCardGridProps {
   cards: ServerPackageCatalogCard[]
@@ -1766,6 +2131,7 @@ interface HandAreaProps {
   title: string
   slotCards: Array<OnlineCardView | null>
   mine?: boolean
+  spectator?: boolean
   canArrange?: boolean
   pinMode?: boolean
   pinnedKeys?: Set<string>
@@ -1774,8 +2140,10 @@ interface HandAreaProps {
   claimable?: boolean
   giving?: boolean
   resultKey?: string | null
+  wrongKey?: string | null
   pickedKey?: string | null
   onCardClick?: (key: string) => void
+  onSlotClick?: (slotIndex: number) => void
   onDragStart?: (event: DragEvent<HTMLButtonElement>, cardKey: string) => void
   onDragOver?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
   onDrop?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
@@ -1790,6 +2158,7 @@ const HandArea = memo(function HandArea({
   title,
   slotCards,
   mine = false,
+  spectator = false,
   canArrange = false,
   pinMode = false,
   pinnedKeys = new Set<string>(),
@@ -1798,8 +2167,10 @@ const HandArea = memo(function HandArea({
   claimable = false,
   giving = false,
   resultKey = null,
+  wrongKey = null,
   pickedKey = null,
   onCardClick,
+  onSlotClick,
   onDragStart,
   onDragOver,
   onDrop,
@@ -1809,15 +2180,32 @@ const HandArea = memo(function HandArea({
   onPointerUp,
   onPointerCancel,
 }: HandAreaProps) {
-  const draggable = mine && canArrange
-  const clickable = Boolean((claimable && !canArrange) || giving || (mine && canArrange && pinMode))
+  const draggable = mine && canArrange && !spectator
+  const clickable = Boolean(!spectator && ((claimable && !canArrange) || giving || (mine && canArrange)))
   const showSlots = Boolean(mine && draggingKey)
+  const suppressArrangeClickRef = useRef(false)
   const handleCardClick = useCallback(
     (event: MouseEvent<HTMLButtonElement>) => {
+      if (suppressArrangeClickRef.current) {
+        suppressArrangeClickRef.current = false
+        return
+      }
+      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
+      if (mine && canArrange && draggingKey && onSlotClick && Number.isInteger(slotIndex)) {
+        onSlotClick(slotIndex)
+        return
+      }
       const cardKey = event.currentTarget.dataset.onlineCardKey
       if (cardKey) onCardClick?.(cardKey)
     },
-    [onCardClick],
+    [canArrange, draggingKey, mine, onCardClick, onSlotClick],
+  )
+  const handleSlotClick = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
+      if (Number.isInteger(slotIndex)) onSlotClick?.(slotIndex)
+    },
+    [onSlotClick],
   )
   const handleCardDragStart = useCallback(
     (event: DragEvent<HTMLButtonElement>) => {
@@ -1842,16 +2230,31 @@ const HandArea = memo(function HandArea({
   )
   const handleCardPointerDown = useCallback(
     (event: PointerEvent<HTMLButtonElement>) => {
+      suppressArrangeClickRef.current = false
       const cardKey = event.currentTarget.dataset.onlineCardKey
       if (cardKey) onPointerDown?.(event, cardKey)
     },
     [onPointerDown],
   )
+  const handleCardPointerUp = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (canArrange && event.pointerType !== 'touch') suppressArrangeClickRef.current = true
+      onPointerUp?.(event)
+    },
+    [canArrange, onPointerUp],
+  )
+  const handleCardPointerCancel = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      if (canArrange && event.pointerType !== 'touch') suppressArrangeClickRef.current = true
+      onPointerCancel?.(event)
+    },
+    [canArrange, onPointerCancel],
+  )
   return (
-    <section className={`hand-area${mine ? ' mine' : ''}${giving ? ' giving' : ''}`}>
+    <section className={`hand-area${mine ? ' mine' : ''}${giving ? ' giving' : ''}${spectator ? ' spectator' : ''}`}>
       <div className="row spread hand-area-heading">
         <strong>{title}</strong>
-        <span className="muted small">{giving ? '点击自己的牌交给对手' : mine ? (canArrange ? (pinMode ? '点击固定牌位' : '可拖动调整') : '你的牌区') : '点击卡面抢牌'}</span>
+        <span className="muted small">{spectator ? '观战中 · 只读' : giving ? '点击自己的牌交给对手' : mine ? (canArrange ? (pinMode ? '点击固定牌位' : draggingKey ? '点击槽位放置选中的牌' : '点击牌再点击槽位，或拖动调整') : '你的牌区') : '点击卡面抢牌'}</span>
       </div>
       <div className="hand-grid-scroll">
         <div className="online-hand-grid">
@@ -1866,6 +2269,7 @@ const HandArea = memo(function HandArea({
                   data-online-slot-index={index}
                   onDragOver={onDragOver ? handleSlotDragOver : undefined}
                   onDrop={onDrop ? handleSlotDrop : undefined}
+                  onClick={onSlotClick ? handleSlotClick : undefined}
                   aria-label={`放置到第 ${index + 1} 个牌槽`}
                 >
                   <span>放置到此槽位</span>
@@ -1883,8 +2287,10 @@ const HandArea = memo(function HandArea({
                 slotIndex={index}
                 picked={pickedKey === meta.key}
                 result={resultKey === meta.key}
+                wrong={wrongKey === meta.key}
+                readOnly={spectator}
                 pinned={pinnedKeys.has(meta.key)}
-                stateLabel={giving ? '点击交牌' : canArrange ? '可调整位置' : undefined}
+                stateLabel={giving ? '点击交牌' : canArrange ? (draggingKey === meta.key ? '已选中' : '点击换位') : undefined}
                 draggable={draggable}
                 dragging={draggingKey === meta.key}
                 dropTarget={dragOverSlot === index && draggingKey !== meta.key}
@@ -1894,9 +2300,9 @@ const HandArea = memo(function HandArea({
                 onDragEnd={onDragEnd}
                 onPointerDown={onPointerDown ? handleCardPointerDown : undefined}
                 onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-                onPointerCancel={onPointerCancel}
-                onClick={clickable && onCardClick ? handleCardClick : undefined}
+                onPointerUp={onPointerUp ? handleCardPointerUp : undefined}
+                onPointerCancel={onPointerCancel ? handleCardPointerCancel : undefined}
+                onClick={clickable && (onCardClick || onSlotClick) ? handleCardClick : undefined}
               />
             )
           })}
@@ -1942,7 +2348,36 @@ function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A'];
   )
 }
 
-const NetworkFairness = memo(function NetworkFairness({ you, network, compact = false }: { you: OnlineRoomView['you']; network: OnlineNetworkDelta | null; compact?: boolean }) {
+function useOnlineNetworkSnapshot(socket: OnlineSocket) {
+  return useSyncExternalStore(socket.subscribeNetwork, socket.getNetworkSnapshot, socket.getNetworkSnapshot)
+}
+
+const OnlineLobbyReadyButton = memo(function OnlineLobbyReadyButton({
+  socket,
+  room,
+  opponent,
+  ready,
+}: {
+  socket: OnlineSocket
+  room: OnlineRoomView
+  opponent: OnlineRoomView['players']['A']
+  ready: boolean
+}) {
+  const network = useOnlineNetworkSnapshot(socket)
+  return (
+    <button
+      className="btn btn-primary btn-lg"
+      type="button"
+      disabled={!opponent || !(network?.fairness.canStart ?? room.fairness.canStart)}
+      onClick={() => socket.send({ t: 'ready', ready: !ready })}
+    >
+      {ready ? '取消准备' : '准备开始'}
+    </button>
+  )
+})
+
+const NetworkFairness = memo(function NetworkFairness({ socket, you, compact = false }: { socket: OnlineSocket; you: OnlineRoomView['you']; compact?: boolean }) {
+  const network = useOnlineNetworkSnapshot(socket)
   if (!network) return null
   const { fairness, players } = network
   if (compact) {

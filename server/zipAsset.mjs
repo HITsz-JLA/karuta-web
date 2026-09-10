@@ -15,6 +15,19 @@ const directoryCache = new Map()
  * them through JSZip for every online round would make a room unusable.
  */
 export async function readZipAsset(filePath, requestPath, fallbackName = '', kind = 'audio') {
+  return readZipAssetInternal(filePath, requestPath, fallbackName, kind)
+}
+
+/**
+ * Read an optional byte range from one ZIP member. Stored members (compression
+ * method 0) can be read directly from the archive; deflated members keep the
+ * existing full-read/decompress fallback.
+ */
+export async function readZipAssetRange(filePath, requestPath, fallbackName = '', rangeHeader = '', kind = 'audio') {
+  return readZipAssetInternal(filePath, requestPath, fallbackName, kind, rangeHeader)
+}
+
+async function readZipAssetInternal(filePath, requestPath, fallbackName, kind, rangeHeader = null) {
   const handle = await fs.open(filePath, 'r')
   try {
     const { size, mtimeMs } = await handle.stat()
@@ -52,6 +65,16 @@ export async function readZipAsset(filePath, requestPath, fallbackName = '', kin
     const localNameLength = localHeader.readUInt16LE(26)
     const localExtraLength = localHeader.readUInt16LE(28)
     const dataOffset = member.localHeaderOffset + 30 + localNameLength + localExtraLength
+    const totalBytes = member.uncompressedSize
+    const range = parseByteRange(rangeHeader, totalBytes)
+    if (range?.invalid) return { data: null, name: member.name, totalBytes, range }
+
+    if (range && member.compression === 0 && member.compressedSize === totalBytes) {
+      const data = Buffer.alloc(range.end - range.start + 1)
+      await readAt(handle, data, dataOffset + range.start)
+      return { data, name: member.name, totalBytes, range, direct: true }
+    }
+
     const compressed = Buffer.alloc(member.compressedSize)
     await readAt(handle, compressed, dataOffset)
 
@@ -60,10 +83,40 @@ export async function readZipAsset(filePath, requestPath, fallbackName = '', kin
     else if (member.compression === 8) data = await inflateRawAsync(compressed)
     else throw new Error('ZIP 资源压缩格式不受支持')
     if (data.byteLength !== member.uncompressedSize) throw new Error('ZIP 资源大小校验失败')
-    return { data, name: member.name }
+    return {
+      data: range ? data.subarray(range.start, range.end + 1) : data,
+      name: member.name,
+      totalBytes,
+      range,
+      direct: false,
+    }
   } finally {
     await handle.close()
   }
+}
+
+function parseByteRange(header, totalBytes) {
+  if (!header) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim())
+  if (!match || totalBytes <= 0) return { invalid: true }
+  const requestedStart = match[1] ? Number(match[1]) : null
+  const requestedEnd = match[2] ? Number(match[2]) : null
+  if (
+    (requestedStart !== null && !Number.isSafeInteger(requestedStart)) ||
+    (requestedEnd !== null && !Number.isSafeInteger(requestedEnd)) ||
+    (requestedStart === null && requestedEnd === null)
+  ) {
+    return { invalid: true }
+  }
+  if (requestedStart === null) {
+    const suffixLength = Math.min(requestedEnd, totalBytes)
+    if (suffixLength <= 0) return { invalid: true }
+    return { start: totalBytes - suffixLength, end: totalBytes - 1 }
+  }
+  if (requestedStart >= totalBytes) return { invalid: true }
+  const end = requestedEnd === null ? totalBytes - 1 : Math.min(requestedEnd, totalBytes - 1)
+  if (end < requestedStart) return { invalid: true }
+  return { start: requestedStart, end }
 }
 
 async function readAt(handle, buffer, position) {

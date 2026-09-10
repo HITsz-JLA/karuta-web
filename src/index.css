@@ -2852,7 +2852,7 @@ body:has(.online-match-page) {
 }
 
 .online-match-page.online-style-card {
-  --online-match-tile-height: clamp(58px, 10vh, 108px);
+  --online-match-tile-height: clamp(42px, 5.8vh, 64px);
 }
 
 .online-match-page.online-style-card .online-match-board .online-card-title {
@@ -2866,7 +2866,7 @@ body:has(.online-match-page) {
 }
 
 .online-match-page.online-style-text {
-  --online-match-tile-height: clamp(42px, 6.5vh, 70px);
+  --online-match-tile-height: clamp(32px, 4.7vh, 54px);
 }
 
 .online-match-page.online-style-text .online-match-board .online-card-title {
@@ -2994,6 +2994,11 @@ body:has(.online-match-page) {
 }
 
 @media (hover: none) {
+  .online-match-page .hand-area.mine .online-card-tile,
+  .online-match-page .hand-area.mine .online-empty-slot {
+    touch-action: manipulation;
+  }
+
   .online-match-page .online-card-tile.available:hover,
   .online-match-page .online-card-tile.available:focus-visible {
     transform: none;
@@ -3035,6 +3040,538 @@ body:has(.online-match-page) {
   .home-live-card,
   .home-equalizer i {
     transition: none;
+    animation: none;
+  }
+}
+
+/* Spectator and event feedback: keep the board read-only while making the
+   owner of every action obvious at a glance. */
+.online-match-page .online-match-board .hand-area:not(.mine),
+.online-spectator-page .hand-area:not(.mine) {
+  border-color: rgba(100, 217, 255, 0.5);
+  background: linear-gradient(145deg, rgba(100, 217, 255, 0.14), rgba(5, 14, 49, 0.58));
+  box-shadow: inset 0 0 24px rgba(100, 217, 255, 0.05);
+}
+
+.online-match-page .online-match-board .hand-area.mine,
+.online-spectator-page .hand-area.mine {
+  border-color: rgba(255, 100, 199, 0.58);
+  background: linear-gradient(145deg, rgba(255, 100, 199, 0.14), rgba(70, 24, 72, 0.52));
+  box-shadow: inset 0 0 24px rgba(255, 100, 199, 0.06);
+}
+
+.online-card-tile.observed {
+  cursor: default;
+  opacity: 1;
+  filter: none;
+}
+
+.online-card-wrong {
+  position: absolute;
+  z-index: 4;
+  inset: 9% 12%;
+  display: grid;
+  place-items: center;
+  color: #72eaff;
+  font-size: clamp(2rem, 4vw, 4.7rem);
+  font-weight: 1000;
+  line-height: 1;
+  pointer-events: none;
+  text-shadow: 0 0 8px rgba(100, 217, 255, 0.94), 0 0 22px rgba(100, 217, 255, 0.55);
+  transform: rotate(-12deg);
+  animation: online-wrong-mark 1.8s ease-out both;
+}
+
+.online-page .hand-area.mine .online-card-wrong {
+  color: #ff9ed5;
+  text-shadow: 0 0 8px rgba(255, 100, 199, 0.94), 0 0 22px rgba(255, 100, 199, 0.55);
+}
+
+@keyframes online-wrong-mark {
+  0% {
+    opacity: 0;
+    transform: rotate(-12deg) scale(1.65);
+  }
+
+  18% {
+    opacity: 1;
+    transform: rotate(-12deg) scale(0.92);
+  }
+
+  34%,
+  78% {
+    opacity: 1;
+    transform: rotate(-12deg) scale(1);
+  }
+
+  100% {
+    opacity: 0.72;
+    transform: rotate(-12deg) scale(0.94);
+  }
+}
+
+.online-battle-animation {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  pointer-events: none;
+}
+
+.online-battle-animation-card {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  min-width: 138px;
+  padding: 13px 17px 15px;
+  border: 1px solid rgba(255, 225, 126, 0.7);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(20, 16, 70, 0.96), rgba(73, 18, 75, 0.94));
+  color: #fff;
+  box-shadow: 0 18px 50px rgba(4, 6, 35, 0.48), 0 0 35px rgba(255, 100, 199, 0.2);
+  text-align: center;
+  animation: online-battle-flight 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.online-battle-animation-card > strong {
+  color: var(--online-yellow);
+  font-size: clamp(0.94rem, 1.5vw, 1.2rem);
+  letter-spacing: 0.05em;
+}
+
+.online-battle-animation-card > span {
+  color: rgba(238, 234, 255, 0.82);
+  font-size: 0.72rem;
+}
+
+.online-battle-animation-card .online-card-tile {
+  width: clamp(118px, 14vw, 178px);
+  border-color: rgba(255, 225, 126, 0.76);
+  box-shadow: 0 0 24px rgba(255, 225, 126, 0.2);
+}
+
+.online-battle-animation-wrong .online-battle-animation-card {
+  border-color: rgba(100, 217, 255, 0.72);
+}
+
+.online-battle-animation-wrong .online-battle-animation-card > strong {
+  color: #72eaff;
+}
+
+.online-battle-animation-transfer.player-A .online-battle-animation-card,
+.online-battle-animation-layout.player-A .online-battle-animation-card {
+  border-color: rgba(100, 217, 255, 0.75);
+}
+
+.online-battle-animation-transfer.player-B .online-battle-animation-card,
+.online-battle-animation-layout.player-B .online-battle-animation-card {
+  border-color: rgba(255, 100, 199, 0.78);
+}
+
+@keyframes online-battle-flight {
+  0% {
+    opacity: 0;
+    transform: translateY(42px) scale(0.78) rotate(-4deg);
+  }
+
+  16% {
+    opacity: 1;
+    transform: translateY(0) scale(1.02) rotate(1deg);
+  }
+
+  70% {
+    opacity: 1;
+    transform: translateY(-10px) scale(1) rotate(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-70px) scale(0.86) rotate(3deg);
+  }
+}
+
+.online-discard-flight {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.online-discard-flight .online-card-tile {
+  animation: online-discard-card 5.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.online-discard-pile {
+  color: var(--online-yellow);
+  font-size: 0.64rem;
+  font-weight: 900;
+  text-align: center;
+}
+
+.online-discard-flight.winner-A .online-discard-pile {
+  color: #72eaff;
+}
+
+.online-discard-flight.winner-B .online-discard-pile {
+  color: #ff9ed5;
+}
+
+@keyframes online-discard-card {
+  0% {
+    opacity: 0;
+    transform: translateY(28px) scale(0.82) rotate(-4deg);
+  }
+
+  12%,
+  70% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.86) rotate(2deg);
+  }
+}
+
+.room-list-item.spectateable {
+  border-color: rgba(255, 100, 199, 0.38);
+  background: linear-gradient(110deg, rgba(255, 100, 199, 0.08), rgba(100, 217, 255, 0.1));
+  cursor: pointer;
+}
+
+.room-list-item.spectateable:hover,
+.room-list-item.spectateable:focus-visible {
+  border-color: var(--online-yellow);
+  box-shadow: 0 8px 22px rgba(100, 217, 255, 0.12);
+}
+
+.online-page .room-code.spectate-label {
+  color: var(--online-yellow);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+}
+
+.online-spectator-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 7px;
+}
+
+.online-spectator-panel {
+  gap: 10px;
+}
+
+.online-spectator-scoreboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.58fr) minmax(0, 1fr);
+  gap: 9px;
+  align-items: stretch;
+}
+
+.online-spectator-player,
+.online-spectator-stage {
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  padding: 11px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 13px;
+  color: #fff;
+  text-align: center;
+}
+
+.online-spectator-player span {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.online-spectator-player strong {
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  line-height: 0.95;
+}
+
+.online-spectator-player small,
+.online-spectator-stage small {
+  color: rgba(238, 234, 255, 0.72);
+  font-size: 0.66rem;
+}
+
+.online-spectator-player.player-a {
+  border-color: rgba(100, 217, 255, 0.54);
+  background: linear-gradient(135deg, rgba(100, 217, 255, 0.16), rgba(5, 14, 49, 0.64));
+}
+
+.online-spectator-player.player-a strong {
+  color: #72eaff;
+}
+
+.online-spectator-player.player-b {
+  border-color: rgba(255, 100, 199, 0.58);
+  background: linear-gradient(135deg, rgba(255, 100, 199, 0.16), rgba(70, 24, 72, 0.58));
+}
+
+.online-spectator-player.player-b strong {
+  color: #ff9ed5;
+}
+
+.online-spectator-stage {
+  border-color: rgba(255, 225, 126, 0.55);
+  background: linear-gradient(135deg, rgba(255, 225, 126, 0.13), rgba(255, 100, 199, 0.1));
+}
+
+.online-spectator-stage span {
+  color: var(--online-yellow);
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.online-spectator-stage strong {
+  color: #fff;
+  font-size: clamp(1.6rem, 2.5vw, 2.25rem);
+  line-height: 1;
+}
+
+.online-spectator-stage.resting {
+  animation: online-ready-pulse 780ms ease-in-out infinite alternate;
+}
+
+.online-spectator-board {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: clamp(7px, 0.8vw, 12px);
+  border: 1px solid rgba(100, 217, 255, 0.22);
+  border-radius: 17px;
+  background: linear-gradient(180deg, rgba(100, 217, 255, 0.06), rgba(255, 100, 199, 0.06));
+}
+
+.online-spectator-board .hand-area {
+  gap: 5px;
+  padding: 8px;
+}
+
+.online-spectator-board .hand-area.spectator .online-card-tile {
+  pointer-events: none;
+}
+
+.online-spectator-board .online-hand-grid {
+  grid-template-columns: repeat(11, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  gap: clamp(4px, 0.45vw, 8px);
+}
+
+.online-spectator-page .online-card-tile {
+  padding: 3px;
+  border-width: 1px;
+  border-radius: 9px;
+}
+
+.online-spectator-page .online-card-image,
+.online-spectator-page .online-slot-placeholder,
+.online-spectator-page .online-empty-slot {
+  height: var(--online-match-tile-height);
+  aspect-ratio: auto;
+  border-radius: 6px;
+}
+
+.online-spectator-page .online-card-title {
+  margin-top: 2px;
+  font-size: clamp(0.44rem, 0.44vw, 0.56rem);
+  line-height: 1.05;
+  -webkit-line-clamp: 1;
+}
+
+.online-spectator-page .online-card-state {
+  display: none;
+}
+
+.online-spectator-page.online-style-card {
+  --online-match-tile-height: clamp(42px, 5.8vh, 64px);
+}
+
+.online-spectator-page.online-style-text {
+  --online-match-tile-height: clamp(32px, 4.7vh, 54px);
+}
+
+.online-spectator-page.online-style-text .online-card-title {
+  font-size: clamp(0.62rem, 0.75vw, 0.82rem);
+  line-height: 1.12;
+  -webkit-line-clamp: 2;
+}
+
+.online-spectator-divider {
+  grid-template-rows: auto auto auto auto;
+  min-height: 0;
+}
+
+.online-spectator-sidebar {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(210px, 1.15fr) minmax(160px, 0.72fr);
+  gap: 8px;
+  align-items: stretch;
+}
+
+.online-spectator-count-panel {
+  align-content: center;
+}
+
+.online-spectator-count-panel > strong {
+  color: var(--online-yellow);
+  font-size: 0.86rem;
+}
+
+.online-spectator-count-panel > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.online-spectator-count-panel .player-a-count b {
+  color: #72eaff;
+}
+
+.online-spectator-count-panel .player-b-count b {
+  color: #ff9ed5;
+}
+
+.online-spectator-waiting {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  padding: 30px 18px;
+  border: 1px dashed rgba(255, 225, 126, 0.56);
+  border-radius: 16px;
+  background: rgba(255, 225, 126, 0.08);
+  color: #fff;
+  text-align: center;
+}
+
+.online-spectator-waiting strong {
+  color: var(--online-yellow);
+  font-size: 1.1rem;
+}
+
+.online-spectator-waiting span,
+.online-spectator-progress {
+  color: rgba(238, 234, 255, 0.76);
+  font-size: 0.76rem;
+}
+
+.online-spectator-progress {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 16px;
+}
+
+.online-spectator-over {
+  position: fixed;
+  z-index: 47;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  gap: 5px;
+  min-width: min(320px, calc(100vw - 36px));
+  padding: 20px 28px;
+  border: 1px solid rgba(255, 225, 126, 0.8);
+  border-radius: 18px;
+  background: rgba(21, 15, 68, 0.95);
+  color: #fff;
+  text-align: center;
+  box-shadow: 0 18px 48px rgba(4, 6, 35, 0.5), 0 0 28px rgba(255, 225, 126, 0.16);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: online-result-float 5.4s ease both;
+}
+
+.online-spectator-over strong {
+  color: var(--online-yellow);
+  font-size: 1.25rem;
+}
+
+.online-spectator-over span {
+  color: rgba(238, 234, 255, 0.76);
+  font-size: 0.78rem;
+}
+
+@media (max-width: 800px) {
+  .online-spectator-sidebar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .online-spectator-sidebar .online-audio-control {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 961px) {
+  .online-spectator-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(190px, 224px);
+    align-items: start;
+  }
+
+  .online-spectator-panel > .online-game-header,
+  .online-spectator-panel > .online-spectator-scoreboard {
+    grid-column: 1 / -1;
+  }
+
+  .online-spectator-board {
+    grid-column: 1;
+  }
+
+  .online-spectator-sidebar {
+    position: sticky;
+    top: 78px;
+    grid-column: 2;
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .online-spectator-scoreboard {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .online-spectator-stage {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .online-spectator-player.player-a,
+  .online-spectator-player.player-b {
+    grid-row: 2;
+  }
+
+  .online-spectator-sidebar {
+    grid-template-columns: 1fr;
+  }
+
+  .online-spectator-sidebar .online-audio-control {
+    grid-column: auto;
+  }
+
+  .online-spectator-actions {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .online-card-wrong,
+  .online-battle-animation-card,
+  .online-discard-flight .online-card-tile,
+  .online-spectator-over,
+  .online-spectator-stage.resting {
     animation: none;
   }
 }

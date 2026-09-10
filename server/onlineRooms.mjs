@@ -88,7 +88,7 @@ export class OnlineRoomManager {
   }
 
   connect(socket, ip = 'unknown') {
-    const session = { socket, ip, room: null, playerId: null, resumeToken: null, network: emptyNetwork() }
+    const session = { socket, ip, room: null, playerId: null, resumeToken: null, spectator: false, network: emptyNetwork() }
     this.sessions.set(socket, session)
     this.send(session, { t: 'welcome', resumed: false })
     return session
@@ -134,6 +134,9 @@ export class OnlineRoomManager {
         case 'joinRoom':
           this.joinRoom(session, message)
           break
+        case 'spectateRoom':
+          this.spectateRoom(session, message)
+          break
         case 'ready':
           this.currentRoom(session)?.setReady(session, message.ready === true)
           break
@@ -172,7 +175,12 @@ export class OnlineRoomManager {
   disconnect(session) {
     if (!this.sessions.delete(session.socket)) return
     const room = session.room
-    if (!room || !session.playerId) return
+    if (!room) return
+    if (session.spectator) {
+      room.removeSpectator(session)
+      return
+    }
+    if (!session.playerId) return
     room.disconnect(session.playerId)
   }
 
@@ -224,10 +232,14 @@ export class OnlineRoomManager {
     const record = this.resumeIndex.get(resumeToken)
     if (!record || record.expiresAt < Date.now()) {
       this.resumeIndex.delete(resumeToken)
+      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
       return
     }
     const seat = record.room.seats[record.playerId]
-    if (!seat || seat.socket) return
+    if (!seat || seat.socket) {
+      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+      return
+    }
     session.room = record.room
     session.playerId = record.playerId
     session.resumeToken = resumeToken
@@ -317,6 +329,33 @@ export class OnlineRoomManager {
     this.broadcastRoomList()
   }
 
+  spectateRoom(session, message) {
+    if (session.room) {
+      this.sendError(session, 'already_in_room', '你已经在一个房间中')
+      return
+    }
+    const code = normalizeCode(message.code)
+    const room = this.rooms.get(code)
+    if (!room || room.phase === 'lobby' || room.phase === 'over') {
+      this.sendError(session, 'spectate_unavailable', '该对局尚未开始或已经结束')
+      return
+    }
+    session.room = room
+    session.spectator = true
+    room.addSpectator(session)
+    room.sendSpectator(session)
+    room.sendNetwork()
+    if (room.current && !room.current.resolved) {
+      this.send(session, {
+        t: 'roundStart',
+        roundNo: room.current.roundNo,
+        startAtServerTime: room.current.startAt,
+        windowMs: ROUND_WINDOW_MS,
+        audioUrl: `/api/online/room/${room.code}/audio/${room.current.token}`,
+      })
+    }
+  }
+
   joinSeat(room, session, nickname, requestedSeat) {
     const playerId = room.seats[requestedSeat] ? 'B' : requestedSeat
     if (room.seats[playerId]) {
@@ -351,7 +390,14 @@ export class OnlineRoomManager {
 
   leave(session) {
     const room = session.room
-    if (!room || !session.playerId) return
+    if (!room) return
+    if (session.spectator) {
+      room.removeSpectator(session)
+      this.forgetSession(session)
+      this.broadcastRoomList()
+      return
+    }
+    if (!session.playerId) return
     const playerId = session.playerId
     room.leave(playerId)
     this.forgetSession(session)
@@ -363,10 +409,16 @@ export class OnlineRoomManager {
     session.room = null
     session.playerId = null
     session.resumeToken = null
+    session.spectator = false
   }
 
   dropRoom(room) {
     if (this.rooms.get(room.code) !== room) return
+    for (const session of room.spectators) {
+      this.send(session, { t: 'error', code: 'room_closed', message: '对局已结束，观战已关闭' })
+      this.forgetSession(session)
+    }
+    room.spectators.clear()
     room.dispose()
     for (const playerId of ['A', 'B']) {
       const seat = room.seats[playerId]
@@ -386,7 +438,7 @@ export class OnlineRoomManager {
 
   roomList() {
     return [...this.rooms.values()]
-      .filter((room) => room.phase === 'lobby')
+      .filter((room) => room.phase !== 'over')
       .map((room) => room.summary())
       .sort((a, b) => a.code.localeCompare(b.code))
   }
@@ -442,6 +494,7 @@ class OnlineRoom {
       imageUrl: `/api/packages/${encodeURIComponent(this.packageId)}/card-image?cardKey=${encodeURIComponent(key)}`,
     }))
     this.seats = { A: null, B: null }
+    this.spectators = new Set()
     this.phase = 'lobby'
     this.roundNo = 0
     this.remaining = new Set(this.cards.map((card) => card.key))
@@ -467,13 +520,24 @@ class OnlineRoom {
     return ['A', 'B'].filter((playerId) => this.seats[playerId]).length
   }
 
+  addSpectator(session) {
+    this.spectators.add(session)
+    this.touch()
+  }
+
+  removeSpectator(session) {
+    this.spectators.delete(session)
+    if (session.room === this) session.room = null
+    session.spectator = false
+  }
+
   summary() {
     return {
       code: this.code,
       name: this.name,
       deckName: this.deckName,
       players: this.playerCount,
-      status: this.phase === 'playing' ? 'playing' : this.playerCount >= 2 ? 'full' : 'waiting',
+      status: this.phase === 'lobby' ? (this.playerCount >= 2 ? 'full' : 'waiting') : 'playing',
     }
   }
 
@@ -582,6 +646,7 @@ class OnlineRoom {
     this.arrangeReadyStartAt = null
     this.restReadyStartAt = null
     this.touch()
+    this.manager.broadcastRoomList()
     this.sendRoom()
   }
 
@@ -656,6 +721,7 @@ class OnlineRoom {
       if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
     }
     this.touch()
+    this.manager.broadcastRoomList()
     this.sendRoom()
     this.scheduleArrangeStart(ARRANGE_WINDOW_MS)
   }
@@ -699,6 +765,7 @@ class OnlineRoom {
       if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
     }
     this.touch()
+    this.manager.broadcastRoomList()
     this.sendRoom()
     this.scheduleNextRound(600)
   }
@@ -1022,6 +1089,7 @@ class OnlineRoom {
     const matchWinner = winner || emptyHandWinner
     this.matchWinner = matchWinner
     this.touch()
+    this.manager.broadcastRoomList()
     this.broadcast({ t: 'matchOver', winner: matchWinner, scores: { ...this.scores }, rounds: this.roundNo })
     this.sendRoom()
   }
@@ -1152,6 +1220,12 @@ class OnlineRoom {
       if (!seat?.socket) continue
       this.manager.send(seat.socket, { t: 'room', room: this.view(playerId) })
     }
+    for (const spectator of this.spectators) this.sendSpectator(spectator)
+  }
+
+  sendSpectator(session) {
+    if (!this.spectators.has(session)) return
+    this.manager.send(session, { t: 'room', room: this.view('A', true) })
   }
 
   networkChanged(forceRoom = false) {
@@ -1188,6 +1262,7 @@ class OnlineRoom {
       if (!seat?.socket) continue
       this.manager.send(seat.socket, message)
     }
+    for (const spectator of this.spectators) this.manager.send(spectator, message)
   }
 
   broadcastPeer(playerId, connected) {
@@ -1199,19 +1274,21 @@ class OnlineRoom {
       const seat = this.seats[playerId]
       if (seat?.socket) this.manager.send(seat.socket, message)
     }
+    for (const spectator of this.spectators) this.manager.send(spectator, message)
   }
 
-  view(you) {
+  view(you, spectator = false) {
     return {
       code: this.code,
       name: this.name,
       packageId: this.packageId,
       deckName: this.deckName,
       you,
+      spectator,
       phase: this.phase,
       players: {
-        A: this.playerView('A', you),
-        B: this.playerView('B', you),
+        A: this.playerView('A', spectator ? null : you, spectator),
+        B: this.playerView('B', spectator ? null : you, spectator),
       },
       cards: this.cardViews,
       remainingCardKeys: [...this.remaining],
@@ -1227,7 +1304,7 @@ class OnlineRoom {
     }
   }
 
-  playerView(playerId, viewerId) {
+  playerView(playerId, viewerId, spectator = false) {
     const seat = this.seats[playerId]
     if (!seat) return null
     return {
@@ -1244,9 +1321,9 @@ class OnlineRoom {
       bannedCount: seat.bannedCardKeys.length,
       // A local layout is private to its owner. Do not expose the owner's
       // order in the opponent's room view.
-      handCardKeys: playerId === viewerId ? [...seat.handCardKeys] : [...seat.handCardKeys].sort(),
+      handCardKeys: spectator || playerId === viewerId ? [...seat.handCardKeys] : [...seat.handCardKeys].sort(),
       layoutCardKeys:
-        playerId !== viewerId && this.phase === 'playing' && seat.layoutCardKeys.length === MAX_HAND_SLOTS
+        seat.layoutCardKeys.length === MAX_HAND_SLOTS && (spectator || (playerId !== viewerId && this.phase === 'playing'))
           ? [...seat.layoutCardKeys]
           : null,
     }
@@ -1356,6 +1433,7 @@ class OnlineRoom {
   dispose() {
     this.disposed = true
     this.clearTimers()
+    this.spectators.clear()
   }
 }
 

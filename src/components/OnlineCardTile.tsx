@@ -9,6 +9,8 @@ interface Props {
   available: boolean
   picked?: boolean
   result?: boolean
+  wrong?: boolean
+  readOnly?: boolean
   pinned?: boolean
   showNumber?: boolean
   slotIndex?: number
@@ -165,6 +167,8 @@ export const OnlineCardTile = memo(function OnlineCardTile({
   available,
   picked,
   result,
+  wrong = false,
+  readOnly = false,
   pinned = false,
   showNumber = true,
   slotIndex,
@@ -187,9 +191,10 @@ export const OnlineCardTile = memo(function OnlineCardTile({
   const imageUrl = cachedRemoteImageUrl || localImageUrl
   const className = [
     'online-card-tile',
-    available ? 'available' : draggable ? 'arrangeable' : 'claimed',
+    available ? 'available' : readOnly ? 'observed' : draggable ? 'arrangeable' : 'claimed',
     picked ? 'picked' : '',
     result ? 'result' : '',
+    wrong ? 'wrong' : '',
     pinned ? 'pinned' : '',
     draggable ? 'draggable' : '',
     dragging ? 'dragging' : '',
@@ -227,8 +232,9 @@ export const OnlineCardTile = memo(function OnlineCardTile({
           <span className="online-card-missing">{card ? '暂无卡面' : '服务器卡面加载中'}</span>
         )}
       </div>
+      {wrong ? <span className="online-card-wrong" aria-label="选错">×</span> : null}
       <span className="online-card-title">{meta.workName}</span>
-      {pinned ? <span className="online-card-state">已固定</span> : stateLabel ? <span className="online-card-state">{stateLabel}</span> : !available ? <span className="online-card-state">已收取</span> : null}
+      {pinned ? <span className="online-card-state">已固定</span> : stateLabel ? <span className="online-card-state">{stateLabel}</span> : !available && !readOnly ? <span className="online-card-state">已收取</span> : null}
     </button>
   )
 })

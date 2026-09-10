@@ -246,6 +246,81 @@ test('resumed clients receive a full room snapshot after incremental updates', a
   }
 })
 
+test('invalid resume tokens are rejected so clients can return to the lobby', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-invalid-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const socket = new FakeSocket()
+    const session = manager.connect(socket)
+    await manager.handle(session, JSON.stringify({ t: 'hello', resumeToken: 'expired-or-unknown' }))
+    const welcome = latest(socket, 'welcome')
+    assert.equal(welcome.resumed, false)
+    assert.equal(welcome.resumeRejected, true)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('spectators receive a read-only full board and live claim events', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-spectator-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const spectatorSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    const spectator = manager.connect(spectatorSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+    assert.equal(latest(spectatorSocket, 'roomList').rooms.find((item) => item.code === room.code)?.status, 'playing')
+
+    const hostLayout = [...room.seats.A.handCardKeys, ...Array(8).fill(null)]
+    const guestLayout = [...room.seats.B.handCardKeys, ...Array(8).fill(null)]
+    await manager.handle(host, JSON.stringify({ t: 'arrangeLayout', cardKeys: hostLayout }))
+    await manager.handle(guest, JSON.stringify({ t: 'arrangeLayout', cardKeys: guestLayout }))
+    await manager.handle(spectator, JSON.stringify({ t: 'spectateRoom', code: room.code }))
+
+    const observed = latest(spectatorSocket, 'room').room
+    assert.equal(observed.spectator, true)
+    assert.deepEqual(observed.players.A.handCardKeys, room.seats.A.handCardKeys)
+    assert.deepEqual(observed.players.B.handCardKeys, room.seats.B.handCardKeys)
+    assert.deepEqual(observed.players.A.layoutCardKeys, hostLayout)
+    assert.deepEqual(observed.players.B.layoutCardKeys, guestLayout)
+    assert.ok(latest(spectatorSocket, 'roundStart'))
+    assert.equal(room.spectators.has(spectator), true)
+
+    const beforeA = [...room.seats.A.handCardKeys]
+    const beforeB = [...room.seats.B.handCardKeys]
+    await manager.handle(spectator, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey: beforeA[0], clientAt: 1 }))
+    await manager.handle(spectator, JSON.stringify({ t: 'arrangeLayout', cardKeys: [...beforeA, ...Array(8).fill(null)] }))
+    assert.deepEqual(room.seats.A.handCardKeys, beforeA)
+    assert.deepEqual(room.seats.B.handCardKeys, beforeB)
+
+    room.current.isEmpty = false
+    room.current.cardKey = beforeA[0]
+    room.current.song = room.cardByKey.get(beforeA[0]).songs[0]
+    room.current.startAt = Date.now() - 100
+    room.current.endsAt = Date.now() + 5_000
+    await manager.handle(host, JSON.stringify({ t: 'claim', roundNo: room.current.roundNo, cardKey: beforeA[0], clientAt: 1 }))
+    assert.equal(latest(spectatorSocket, 'claimFeedback').playerId, 'A')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
 test('claim settlement lets a later high-RTT claim win after compensation', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-compensation-'))
   const manager = new OnlineRoomManager(temp)
