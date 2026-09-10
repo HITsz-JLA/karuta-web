@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import express from 'express'
 import multer from 'multer'
 import { WebSocketServer } from 'ws'
+import { logOnlineEvent } from './onlineLog.mjs'
 import { OnlineRoomManager } from './onlineRooms.mjs'
 import { readZipAssetRange } from './zipAsset.mjs'
 
@@ -387,22 +388,40 @@ app.get('/api/online/room/:code/audio/:token', async (request, response, next) =
     response.setHeader('Cache-Control', 'private, max-age=60, must-revalidate')
     response.setHeader('Accept-Ranges', 'bytes')
     if (range?.invalid) {
+      logOnlineEvent('audio.range_rejected', {
+        room: request.params.code,
+        totalBytes,
+        requestedRange: request.headers.range,
+      })
       response.status(416)
       response.setHeader('Content-Range', `bytes */${totalBytes}`)
       response.end()
       return
     }
     if (range) {
+      logOnlineEvent('audio.served', {
+        room: request.params.code,
+        status: 206,
+        ranged: true,
+        bytes: media.data.byteLength,
+      })
       response.status(206)
       response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${totalBytes}`)
       response.setHeader('Content-Length', String(media.data.byteLength))
       response.send(media.data)
       return
     }
+    logOnlineEvent('audio.served', {
+      room: request.params.code,
+      status: 200,
+      ranged: false,
+      bytes: media.data.byteLength,
+    })
     response.setHeader('Content-Length', String(totalBytes))
     response.send(media.data)
   } catch (error) {
     if (error?.code === 'ENOENT') {
+      logOnlineEvent('audio.miss', { room: request.params.code, reason: 'asset_missing' })
       response.status(404).json({ message: '音频资源不存在' })
       return
     }
@@ -488,6 +507,11 @@ function pingWebsocket(socket) {
   try {
     socket.ping()
   } catch {
+    logOnlineEvent('ws.ping_failed', {
+      sessionId: socket.karutaSession?.id,
+      room: socket.karutaSession?.room?.code,
+      playerId: socket.karutaSession?.playerId,
+    })
     socket.terminate()
   }
 }
@@ -511,13 +535,15 @@ httpServer.on('upgrade', (request, socket, head) => {
 
 websocketServer.on('connection', (socket, request) => {
   const session = onlineRooms.connect(socket, request.socket.remoteAddress || 'unknown')
+  socket.karutaSession = session
   let disconnected = false
   socket.isAlive = true
   socket.karutaPingAt = 0
   socket.karutaMissedPongs = 0
-  const disconnect = () => {
+  const disconnect = (reason) => {
     if (disconnected) return
     disconnected = true
+    session.disconnectReason = reason
     onlineRooms.disconnect(session)
   }
   socket.on('message', (message) => {
@@ -530,8 +556,16 @@ websocketServer.on('connection', (socket, request) => {
     socket.karutaPingAt = 0
     if (sentAt) onlineRooms.recordPong(session, Date.now() - sentAt)
   })
-  socket.on('close', disconnect)
-  socket.on('error', disconnect)
+  socket.on('close', () => disconnect('close'))
+  socket.on('error', (error) => {
+    logOnlineEvent('ws.error', {
+      sessionId: session.id,
+      room: session.room?.code,
+      playerId: session.playerId,
+      code: error?.code,
+    })
+    disconnect('error')
+  })
   pingWebsocket(socket)
 })
 
@@ -540,6 +574,12 @@ const websocketHeartbeatTimer = setInterval(() => {
     if (socket.isAlive === false) {
       socket.karutaMissedPongs = (socket.karutaMissedPongs || 0) + 1
       if (socket.karutaMissedPongs >= 3) {
+        logOnlineEvent('ws.heartbeat_timeout', {
+          sessionId: socket.karutaSession?.id,
+          room: socket.karutaSession?.room?.code,
+          playerId: socket.karutaSession?.playerId,
+          missedPongs: socket.karutaMissedPongs,
+        })
         socket.terminate()
       }
       continue
