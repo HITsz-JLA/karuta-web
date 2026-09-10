@@ -119,7 +119,7 @@ test('two players can create, join, ready, receive a round and claim a card', as
     await manager.handle(host, JSON.stringify({ t: 'arrangeLayout', cardKeys: hostLayout }))
     assert.equal(latest(hostSocket, 'room').room.players.A.layoutCardKeys, null)
     assert.deepEqual(latest(guestSocket, 'room').room.players.A.layoutCardKeys, hostLayout)
-    await new Promise((resolve) => setTimeout(resolve, 1_450))
+    await new Promise((resolve) => setTimeout(resolve, 2_850))
     const round = latest(hostSocket, 'roundStart')
     assert.ok(round)
     assert.match(round.audioUrl, new RegExp(`/api/online/room/${joined.room.code}/audio/`))
@@ -166,6 +166,36 @@ test('odd candidate pools discard one server-side card before splitting', async 
     assert.equal(draft.phase, 'draft_select')
     assert.equal(draft.draft.poolCardKeys.length, 30)
     assert.equal(latest(guestSocket, 'room').room.draft.poolCardKeys.length, 30)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('candidate pools larger than 200 are sampled before the draft split', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-sample-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp, 240)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    assert.equal(created.room.cards.length, 200)
+    assert.equal(new Set(created.room.cards.map((card) => card.key)).size, 200)
+
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const hostDraft = latest(hostSocket, 'room').room
+    const guestDraft = latest(guestSocket, 'room').room
+    assert.equal(hostDraft.phase, 'draft_select')
+    assert.equal(hostDraft.draft.poolCardKeys.length, 100)
+    assert.equal(guestDraft.draft.poolCardKeys.length, 100)
+    assert.equal(new Set([...hostDraft.draft.poolCardKeys, ...guestDraft.draft.poolCardKeys]).size, 200)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -516,7 +546,7 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
-    await new Promise((resolve) => setTimeout(resolve, 1_450))
+    await new Promise((resolve) => setTimeout(resolve, 2_850))
     const round = latest(hostSocket, 'roundStart')
     if (room.current.isEmpty) {
       const cardKey = [...room.remaining][0]
@@ -559,7 +589,7 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
-    await new Promise((resolve) => setTimeout(resolve, 1_450))
+    await new Promise((resolve) => setTimeout(resolve, 2_850))
 
     const round = latest(hostSocket, 'roundStart')
     if (room.current.isEmpty) {
@@ -614,7 +644,7 @@ test('a wrong claim automatically transfers one card when the transfer window ex
     await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
-    await new Promise((resolve) => setTimeout(resolve, 1_450))
+    await new Promise((resolve) => setTimeout(resolve, 2_850))
 
     const round = latest(hostSocket, 'roundStart')
     if (room.current.isEmpty) {

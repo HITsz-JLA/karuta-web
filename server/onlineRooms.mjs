@@ -9,6 +9,7 @@ const MAX_NICKNAME_LENGTH = 20
 const MAX_ROOM_NAME_LENGTH = 40
 const MIN_CANDIDATE_CARDS = 60
 const MAX_CARDS = 500
+const ONLINE_CANDIDATE_LIMIT = 200
 const DRAFT_SELECTION_SIZE = 30
 const BAN_SIZE = 5
 const HAND_SIZE = DRAFT_SELECTION_SIZE - BAN_SIZE
@@ -19,7 +20,10 @@ const REST_WINDOW_MS = 40_000
 const WRONG_TRANSFER_TIMEOUT_MS = REST_WINDOW_MS
 const REST_AUDIO_GRACE_MS = 10_000
 const ROUND_WINDOW_MS = 10_000
-const ROUND_LEAD_MS = 750
+// Give clients enough time to start the media request before the authoritative
+// round timestamp. The server still evaluates claims against startAt, so this
+// does not change the fair claim window.
+const ROUND_LEAD_MS = 2_000
 const ROOM_TTL_MS = 30 * 60 * 1000
 const RESUME_TTL_MS = 90 * 1000
 const MAX_SPECTATORS = 32
@@ -300,12 +304,12 @@ export class OnlineRoomManager {
       return
     }
     if (!packageId || !CURATED_PACKAGE_IDS.has(packageId)) {
-      this.sendError(session, 'bad_room', '在线歌牌只能使用服务器上的四套 MUCA 牌组')
+      this.sendError(session, 'bad_room', '在线歌牌只能使用服务器上已发布的牌组')
       return
     }
     const catalog = await this.getPackageCatalog(packageId)
     if (!catalog) {
-      this.sendError(session, 'package_not_found', '服务器找不到该 MUCA 牌组或牌组目录无效')
+      this.sendError(session, 'package_not_found', '服务器找不到该牌组或牌组目录无效')
       return
     }
     const requestedKeys = Array.isArray(message.cardKeys)
@@ -319,7 +323,12 @@ export class OnlineRoomManager {
       return
     }
 
-    const roomCards = cards.value.length % 2 === 0 ? cards.value : shuffle(cards.value).slice(0, -1)
+    // Large catalogues are sampled at room creation time. The authoritative
+    // room list is then split by the normal draft flow for both players.
+    const candidateCards = cards.value.length > ONLINE_CANDIDATE_LIMIT
+      ? shuffle(cards.value).slice(0, ONLINE_CANDIDATE_LIMIT)
+      : cards.value
+    const roomCards = candidateCards.length % 2 === 0 ? candidateCards : shuffle(candidateCards).slice(0, -1)
     const room = new OnlineRoom(this, {
       code: this.newCode(),
       name,
