@@ -22,11 +22,16 @@ export async function loadPackageCatalog(packagePath, packageId = path.basename(
   const cards = rows
     .map((row, index) => normalizeRow(row, index))
     .filter((card) => card && card.songs.length)
+  const cardByKey = new Map()
+  for (const card of cards) {
+    if (!cardByKey.has(card.key)) cardByKey.set(card.key, card)
+  }
 
   const catalog = {
     packageId,
     deckName: path.basename(packageId).replace(/\.zip$/i, ''),
     cards,
+    cardByKey,
   }
   catalogCache.set(packagePath, { size: stats.size, updatedAt: stats.mtimeMs, catalog })
   return catalog
@@ -37,6 +42,8 @@ export function clearPackageCatalogCache() {
 }
 
 export function findCatalogCard(catalog, key) {
+  const indexed = catalog.cardByKey?.get(key)
+  if (indexed) return indexed
   return catalog.cards.find((card) => card.key === key) || null
 }
 
