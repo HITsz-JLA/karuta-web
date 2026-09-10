@@ -21,12 +21,14 @@ function readResume(): StoredResume | null {
   return null
 }
 
-function writeResume(value: StoredResume | null) {
+function writeResume(value: StoredResume | null, serialized = value ? JSON.stringify(value) : null) {
   try {
-    if (value) localStorage.setItem(RESUME_KEY, JSON.stringify(value))
+    if (value) localStorage.setItem(RESUME_KEY, serialized || '')
     else localStorage.removeItem(RESUME_KEY)
+    return true
   } catch {
     // Resume is a convenience, not a prerequisite for a match.
+    return false
   }
 }
 
@@ -43,13 +45,21 @@ export class OnlineSocket {
   private reconnectAttempt = 0
   private readonly offsets: number[] = []
   private networkSnapshot: OnlineNetworkSnapshot | null = null
-  private resumeToken: string | null = readResume()?.token || null
-  private roomCode: string | null = readResume()?.roomCode || null
+  private resumeToken: string | null
+  private roomCode: string | null
+  private persistedResume: StoredResume | null = null
   private spectatorRoomCode: string | null = null
   private shouldReconnect = true
 
   clockOffsetMs = 0
   connected = false
+
+  constructor() {
+    const resume = readResume()
+    this.resumeToken = resume?.token || null
+    this.roomCode = resume?.roomCode || null
+    this.persistedResume = resume
+  }
 
   async connect(): Promise<void> {
     this.shouldReconnect = true
@@ -94,13 +104,13 @@ export class OnlineSocket {
             this.send({ t: 'listRooms' })
           } else if (message.resumeToken) {
             this.resumeToken = message.resumeToken
-            writeResume({ roomCode: this.roomCode || '', token: message.resumeToken })
+            this.persistResume()
           }
         }
         if (message.t === 'room') {
           this.roomCode = message.room.code
           this.spectatorRoomCode = message.room.spectator ? message.room.code : null
-          if (this.resumeToken) writeResume({ roomCode: message.room.code, token: this.resumeToken })
+          this.persistResume()
           this.publishNetworkSnapshot({
             t: 'network',
             players: {
@@ -176,6 +186,7 @@ export class OnlineSocket {
     this.roomCode = null
     this.spectatorRoomCode = null
     writeResume(null)
+    this.persistedResume = null
   }
 
   setSpectatorRoom(code: string) {
@@ -214,6 +225,13 @@ export class OnlineSocket {
   private stopPing() {
     if (this.pingTimer) window.clearInterval(this.pingTimer)
     this.pingTimer = 0
+  }
+
+  private persistResume() {
+    if (!this.resumeToken) return
+    const value = { roomCode: this.roomCode || '', token: this.resumeToken }
+    if (this.persistedResume?.roomCode === value.roomCode && this.persistedResume?.token === value.token) return
+    if (writeResume(value)) this.persistedResume = value
   }
 
   private notePong(clientAt: number, serverAt: number) {
