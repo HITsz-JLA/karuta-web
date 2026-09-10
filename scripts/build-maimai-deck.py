@@ -17,6 +17,8 @@ import csv
 import io
 import json
 import re
+import shutil
+import subprocess
 import unicodedata
 import zipfile
 from dataclasses import dataclass
@@ -24,6 +26,8 @@ from pathlib import Path
 
 
 MIN_LEVEL = 12.5
+DEFAULT_AUDIO_DURATION = 30.0
+DEFAULT_AUDIO_BITRATE = "128k"
 ZIP32_LIMIT = (1 << 32) - 1
 IMAGE_NAMES = ("bg.webp", "bg.jpg", "bg.jpeg", "bg.png")
 AUDIO_NAMES = ("track.mp3", "track.ogg", "track.m4a", "track.wav")
@@ -67,6 +71,22 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data-packages/maimai-master-12plus.zip"),
         help="output karuta-web package ZIP",
+    )
+    parser.add_argument(
+        "--audio-duration",
+        type=float,
+        default=DEFAULT_AUDIO_DURATION,
+        help="seconds of audio to keep per card; use 0 to keep the full source audio",
+    )
+    parser.add_argument(
+        "--audio-bitrate",
+        default=DEFAULT_AUDIO_BITRATE,
+        help="bitrate for the generated MP3 segments (default: 128k)",
+    )
+    parser.add_argument(
+        "--ffmpeg",
+        type=Path,
+        help="path to ffmpeg; defaults to ffmpeg found on PATH",
     )
     parser.add_argument("--dry-run", action="store_true", help="scan and report, but do not write a package")
     parser.add_argument("--json-report", type=Path, help="also write the selection report as JSON")
@@ -230,7 +250,54 @@ def safe_csv_row(candidate: Candidate, number: int, image_path: str, audio_path:
     ]
 
 
-def build_package(candidates: list[Candidate], output: Path) -> None:
+def resolve_ffmpeg(path: Path | None) -> str | None:
+    if path:
+        if path.is_file():
+            return str(path)
+        raise SystemExit(f"ffmpeg executable not found: {path}")
+    return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+
+
+def make_audio_segment(data: bytes, ffmpeg: str, duration: float, bitrate: str, source_name: str) -> bytes:
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:a:0",
+        *(["-t", f"{duration:g}"] if duration > 0 else []),
+        "-vn",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        bitrate,
+        "-f",
+        "mp3",
+        "pipe:1",
+    ]
+    result = subprocess.run(command, input=data, capture_output=True, check=False)
+    if result.returncode != 0 or not result.stdout:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg failed for {source_name}: {detail or 'no output'}")
+    return result.stdout
+
+
+def build_package(
+    candidates: list[Candidate],
+    output: Path,
+    audio_duration: float = DEFAULT_AUDIO_DURATION,
+    audio_bitrate: str = DEFAULT_AUDIO_BITRATE,
+    ffmpeg: str | None = None,
+) -> None:
+    if audio_duration < 0:
+        raise SystemExit("--audio-duration must be zero or greater")
+    if audio_duration > 0 and not ffmpeg:
+        raise SystemExit("ffmpeg is required to build 30-second segments; install ffmpeg or pass --ffmpeg")
+
     output.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "category",
@@ -255,13 +322,17 @@ def build_package(candidates: list[Candidate], output: Path) -> None:
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as target:
         for number, candidate in enumerate(candidates, start=1):
             image_suffix = Path(candidate.image_entry).suffix.lower() or ".jpg"
-            audio_suffix = Path(candidate.audio_entry).suffix.lower() or ".mp3"
             image_path = f"images/{number}{image_suffix}"
-            audio_path = f"audio/{number}{audio_suffix}"
+            audio_path = f"mp3_files/seg_30/MAIMAI/{number}.mp3"
             writer.writerow(safe_csv_row(candidate, number, image_path, audio_path))
             with zipfile.ZipFile(candidate.archive) as source_zip:
                 target.writestr(image_path, source_zip.read(candidate.image_entry))
-                target.writestr(audio_path, source_zip.read(candidate.audio_entry))
+                source_audio = source_zip.read(candidate.audio_entry)
+                if audio_duration > 0:
+                    audio = make_audio_segment(source_audio, ffmpeg, audio_duration, audio_bitrate, candidate.audio_entry)
+                else:
+                    audio = source_audio
+                target.writestr(audio_path, audio)
 
         manifest = {
             "format": "karuta-web",
@@ -271,6 +342,7 @@ def build_package(candidates: list[Candidate], output: Path) -> None:
             "source": "D:\\maimaikaruta",
             "cardCount": len(candidates),
             "selection": "MASTER or RE:MASTER >= 12+, DX/version duplicates de-duplicated, Remix retained",
+            "audio": "30-second MP3 segments" if audio_duration > 0 else "full source audio",
         }
         target.writestr("meta/manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         target.writestr("meta/metadata.csv", csv_buffer.getvalue().encode("utf-8"))
@@ -308,7 +380,8 @@ def main() -> None:
         args.json_report.parent.mkdir(parents=True, exist_ok=True)
         args.json_report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if not args.dry_run:
-        build_package(candidates, args.output)
+        ffmpeg = resolve_ffmpeg(args.ffmpeg)
+        build_package(candidates, args.output, args.audio_duration, args.audio_bitrate, ffmpeg)
         print(f"wrote: {args.output} ({args.output.stat().st_size} bytes)")
 
 
