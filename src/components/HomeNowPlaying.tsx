@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getBlob } from '../lib/storage'
 import type { CardEntry, DeckRecord, SongEntry } from '../types/models'
 
@@ -52,7 +52,7 @@ function playbackError(error: unknown) {
   return error instanceof Error ? error.message : '音频加载失败，请重试'
 }
 
-export function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: HomeNowPlayingProps) {
+export const HomeNowPlaying = memo(function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: HomeNowPlayingProps) {
   const tracks = useMemo<PreviewTrack[]>(
     () =>
       deck?.cards.flatMap((card) =>
@@ -368,4 +368,4 @@ export function HomeNowPlaying({ deck, selectedCard, volume, onVolumeChange }: H
       </span>
     </section>
   )
-}
+})

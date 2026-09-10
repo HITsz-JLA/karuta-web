@@ -920,6 +920,34 @@ body:has(.online-page) .btn-ghost {
   overflow: auto;
 }
 
+/* The home page can contain hundreds of works. Keep the scrollbar and total
+   height, but only paint the rows around the current viewport. */
+.works-list-virtualized {
+  position: relative;
+  contain: layout paint;
+  scrollbar-gutter: stable;
+}
+
+.works-list-canvas {
+  position: relative;
+  width: 100%;
+  flex: 0 0 auto;
+}
+
+.works-list-window {
+  position: absolute;
+  right: 0;
+  left: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.works-list-window .work-item {
+  height: 56px;
+  min-height: 56px;
+  overflow: hidden;
+}
+
 .work-item {
   display: flex;
   gap: 10px;
@@ -1370,6 +1398,13 @@ body:has(.online-page) .btn-ghost {
   max-height: min(66dvh, 720px);
   overflow: auto;
   padding: 3px;
+  contain: layout paint;
+  scrollbar-gutter: stable;
+}
+
+.draft-card-grid > .online-card-tile {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 230px;
 }
 
 @media (min-width: 560px) {
@@ -2567,6 +2602,28 @@ body:has(.online-page) .btn-ghost {
   background: linear-gradient(145deg, rgba(27, 20, 75, 0.96), rgba(49, 19, 74, 0.94)) !important;
   box-shadow: 0 16px 42px rgba(4, 6, 35, 0.42), 0 0 28px rgba(255, 100, 199, 0.14);
   animation: online-result-float 5.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.online-match-review-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin-top: 12px;
+  border: 1px solid rgba(255, 225, 126, 0.42);
+  background: linear-gradient(110deg, rgba(255, 225, 126, 0.16), rgba(255, 100, 199, 0.12));
+  color: #fff4bb;
+}
+
+.online-match-review-banner span {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.online-match-over-card .versus-players {
+  margin-top: 8px;
+}
+
+.online-match-over-note {
+  margin: 0;
 }
 
 .online-result-overlay .online-result-body {
