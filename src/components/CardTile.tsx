@@ -25,7 +25,9 @@ function areCardTilePropsEqual(previous: CardTileProps, next: CardTileProps) {
 }
 
 export const CardTile = memo(function CardTile({ card, selected, onClick, onToggle, showSongCount = true }: CardTileProps) {
-  const url = useObjectUrl(card.imageBlobKey)
+  // Selection only needs a small preview. Generating this thumbnail off the
+  // render path avoids decoding every imported full-resolution cover at once.
+  const url = useObjectUrl(card.imageBlobKey, { thumbnail: true })
   const handleClick = onToggle ? () => onToggle(card.id) : onClick
 
   return (

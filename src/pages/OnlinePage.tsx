@@ -1647,7 +1647,7 @@ export function OnlinePage() {
           <NetworkFairness socket={socket} you={room.you} />
           <div className="online-board compact">
             {orderedRoomCards.map((meta) => (
-              <OnlineCardTile key={meta.key} meta={meta} available={false} />
+              <OnlineCardTile key={meta.key} meta={meta} available={false} thumbnail />
             ))}
           </div>
           <div className="row spread">
@@ -2326,7 +2326,7 @@ const VirtualServerCard = memo(function VirtualServerCard({
   onToggle: (cardKey: string) => void
 }) {
   const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
-  return <OnlineCardTile meta={meta} card={null} available picked={selected} onClick={handleClick} />
+  return <OnlineCardTile meta={meta} card={null} available picked={selected} thumbnail onClick={handleClick} />
 })
 
 /**
@@ -2412,7 +2412,7 @@ const DraftCard = memo(function DraftCard({
   onToggle: (cardKey: string) => void
 }) {
   const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
-  return <OnlineCardTile meta={meta} available picked={selected} onClick={handleClick} />
+  return <OnlineCardTile meta={meta} available picked={selected} thumbnail onClick={handleClick} />
 })
 
 interface DraftCardPickerProps {

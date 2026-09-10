@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { getBlobUrl } from '../lib/storage'
+import { getBlob, getBlobUrl } from '../lib/storage'
+import { createThumbnailObjectUrl, enqueueImageLoad } from '../lib/imagePreview'
 
 interface CachedObjectUrl {
   url: string
@@ -25,53 +26,60 @@ function trimIdleObjectUrls() {
   }
 }
 
-async function acquireObjectUrl(blobKey: string): Promise<string | null> {
-  const cached = objectUrlCache.get(blobKey)
+async function acquireObjectUrl(blobKey: string, thumbnail: boolean): Promise<string | null> {
+  const cacheKey = thumbnail ? `thumbnail:${blobKey}` : blobKey
+  const cached = objectUrlCache.get(cacheKey)
   if (cached) {
     cached.refs += 1
-    touchObjectUrl(blobKey, cached)
+    touchObjectUrl(cacheKey, cached)
     return cached.url
   }
 
-  let pending = pendingObjectUrls.get(blobKey)
+  let pending = pendingObjectUrls.get(cacheKey)
   if (!pending) {
-    pending = getBlobUrl(blobKey).finally(() => {
-      pendingObjectUrls.delete(blobKey)
+    pending = enqueueImageLoad(async () => {
+      if (!thumbnail) return getBlobUrl(blobKey)
+      const blob = await getBlob(blobKey)
+      return blob ? createThumbnailObjectUrl(blob) : null
+    }).finally(() => {
+      pendingObjectUrls.delete(cacheKey)
     })
-    pendingObjectUrls.set(blobKey, pending)
+    pendingObjectUrls.set(cacheKey, pending)
   }
 
   const url = await pending
   if (!url) return null
 
-  const raced = objectUrlCache.get(blobKey)
+  const raced = objectUrlCache.get(cacheKey)
   if (raced) {
     raced.refs += 1
-    touchObjectUrl(blobKey, raced)
+    touchObjectUrl(cacheKey, raced)
     if (raced.url !== url) URL.revokeObjectURL(url)
     return raced.url
   }
 
-  objectUrlCache.set(blobKey, { url, refs: 1 })
+  objectUrlCache.set(cacheKey, { url, refs: 1 })
   trimIdleObjectUrls()
   return url
 }
 
-function releaseObjectUrl(blobKey: string, url: string) {
-  const cached = objectUrlCache.get(blobKey)
+function releaseObjectUrl(cacheKey: string, url: string) {
+  const cached = objectUrlCache.get(cacheKey)
   if (!cached || cached.url !== url) return
   cached.refs -= 1
   if (cached.refs > 0) return
-  touchObjectUrl(blobKey, cached)
+  touchObjectUrl(cacheKey, cached)
   trimIdleObjectUrls()
 }
 
-export function useObjectUrl(blobKey: string | null | undefined) {
+export function useObjectUrl(blobKey: string | null | undefined, options: { thumbnail?: boolean } = {}) {
   const [url, setUrl] = useState<string | null>(null)
+  const thumbnail = options.thumbnail === true
 
   useEffect(() => {
     let active = true
     let acquiredUrl: string | null = null
+    const cacheKey = blobKey ? (thumbnail ? `thumbnail:${blobKey}` : blobKey) : null
 
     if (!blobKey) {
       setUrl(null)
@@ -79,9 +87,9 @@ export function useObjectUrl(blobKey: string | null | undefined) {
     }
 
     setUrl(null)
-    void acquireObjectUrl(blobKey).then((next) => {
+    void acquireObjectUrl(blobKey, thumbnail).then((next) => {
       if (!active) {
-        if (next) releaseObjectUrl(blobKey, next)
+        if (next && cacheKey) releaseObjectUrl(cacheKey, next)
         return
       }
       acquiredUrl = next
@@ -90,9 +98,9 @@ export function useObjectUrl(blobKey: string | null | undefined) {
 
     return () => {
       active = false
-      if (acquiredUrl) releaseObjectUrl(blobKey, acquiredUrl)
+      if (acquiredUrl && cacheKey) releaseObjectUrl(cacheKey, acquiredUrl)
     }
-  }, [blobKey])
+  }, [blobKey, thumbnail])
 
   return url
 }
