@@ -44,6 +44,10 @@ const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
 const onlineRooms = new OnlineRoomManager(dataDir, {
   maxRooms: Number(process.env.ONLINE_MAX_ROOMS || 100),
 })
+// packageCatalog returns the same object while the archive's size and mtime
+// are unchanged. Cache only the derived wire body by that object identity, so
+// an invalidated catalog can never reuse a stale response.
+const catalogResponseCache = new WeakMap()
 
 async function getAdminPassword() {
   const configured = process.env.ADMIN_PASSWORD?.trim()
@@ -264,19 +268,10 @@ app.get('/api/packages/:id/catalog', async (request, response, next) => {
       response.status(404).json({ message: '在线 MUCA 牌组不存在' })
       return
     }
-    response.json({
-      catalog: {
-        packageId: catalog.packageId,
-        deckName: catalog.deckName,
-        cards: catalog.cards.map(({ key, number, imageName, workName, songs }) => ({
-          key,
-          number,
-          imageName,
-          workName,
-          songCount: songs.length,
-        })),
-      },
-    })
+    const cached = catalogResponseCache.get(catalog) || buildCatalogResponse(catalog)
+    response.type('json')
+    response.setHeader('Content-Length', String(cached.byteLength))
+    response.send(cached.body)
   } catch (error) {
     next(error)
   }
@@ -459,6 +454,25 @@ function imageMime(fileName) {
   if (ext === '.gif') return 'image/gif'
   if (ext === '.bmp') return 'image/bmp'
   return 'image/jpeg'
+}
+
+function buildCatalogResponse(catalog) {
+  const body = JSON.stringify({
+    catalog: {
+      packageId: catalog.packageId,
+      deckName: catalog.deckName,
+      cards: catalog.cards.map(({ key, number, imageName, workName, songs }) => ({
+        key,
+        number,
+        imageName,
+        workName,
+        songCount: songs.length,
+      })),
+    },
+  })
+  const cached = { body, byteLength: Buffer.byteLength(body) }
+  catalogResponseCache.set(catalog, cached)
+  return cached
 }
 
 const httpServer = createServer(app)

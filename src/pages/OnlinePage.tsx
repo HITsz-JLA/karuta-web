@@ -109,14 +109,87 @@ interface ClaimState {
 }
 
 type BattleAnimation =
+  | { id: number; kind: 'claim'; playerId: OnlinePlayerId; cardKey: string }
   | { id: number; kind: 'wrong'; playerId: OnlinePlayerId; cardKey: string }
   | { id: number; kind: 'transfer'; from: OnlinePlayerId; to: OnlinePlayerId; cardKey: string; automatic: boolean }
-  | { id: number; kind: 'layout'; playerId: OnlinePlayerId; cardKey: string; targetSlot: number | null }
+  | {
+      id: number
+      kind: 'layout'
+      playerId: OnlinePlayerId
+      cardKey: string
+      sourceSlot: number
+      targetSlot: number | null
+      exchangeCardKey: string | null
+    }
+  | { id: number; kind: 'discard'; winner: OnlinePlayerId | null; cardKey: string }
 
 type BattleAnimationPayload =
+  | Omit<Extract<BattleAnimation, { kind: 'claim' }>, 'id'>
   | Omit<Extract<BattleAnimation, { kind: 'wrong' }>, 'id'>
   | Omit<Extract<BattleAnimation, { kind: 'transfer' }>, 'id'>
   | Omit<Extract<BattleAnimation, { kind: 'layout' }>, 'id'>
+  | Omit<Extract<BattleAnimation, { kind: 'discard' }>, 'id'>
+
+const BATTLE_ANIMATION_DURATION_MS = 2_400
+const BATTLE_ANIMATION_DEDUPE_WINDOW_MS = 1_200
+const BATTLE_ANIMATION_LOCAL_ECHO_WINDOW_MS = 8_000
+const MAX_BATTLE_ANIMATION_QUEUE = 8
+
+function battleAnimationKey(payload: BattleAnimationPayload | BattleAnimation) {
+  switch (payload.kind) {
+    case 'claim':
+    case 'wrong':
+      return `${payload.kind}:${payload.playerId}:${payload.cardKey}`
+    case 'transfer':
+      return `${payload.kind}:${payload.from}:${payload.to}:${payload.cardKey}:${payload.automatic ? 'auto' : 'manual'}`
+    case 'layout':
+      return `${payload.kind}:${payload.playerId}:${payload.cardKey}:${payload.sourceSlot}:${payload.targetSlot ?? 'none'}:${payload.exchangeCardKey || ''}`
+    case 'discard':
+      return `${payload.kind}:${payload.winner || 'none'}:${payload.cardKey}`
+  }
+}
+
+function createLayoutAnimation(
+  before: Array<string | null> | null | undefined,
+  after: Array<string | null> | null | undefined,
+  playerId: OnlinePlayerId,
+): Extract<BattleAnimationPayload, { kind: 'layout' }> | null {
+  let changedIndex = -1
+  for (let index = 0; index < MAX_HAND_SLOTS; index += 1) {
+    if ((before?.[index] || null) !== (after?.[index] || null)) {
+      changedIndex = index
+      break
+    }
+  }
+  if (changedIndex < 0) return null
+
+  const beforeSlots = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => before?.[index] || null)
+  const afterSlots = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => after?.[index] || null)
+  const beforeKeys = beforeSlots.filter((key): key is string => Boolean(key))
+  const afterKeys = afterSlots.filter((key): key is string => Boolean(key))
+  const beforeSet = new Set(beforeKeys)
+  const afterSet = new Set(afterKeys)
+  if (
+    beforeKeys.length !== beforeSet.size ||
+    afterKeys.length !== afterSet.size ||
+    beforeKeys.length !== afterKeys.length ||
+    beforeKeys.some((key) => !afterSet.has(key)) ||
+    afterKeys.some((key) => !beforeSet.has(key))
+  ) {
+    return null
+  }
+
+  const movedKey = afterSlots.find(
+    (key, index) => Boolean(key) && key !== beforeSlots[index] && beforeSlots.indexOf(key) !== index,
+  )
+  const cardKey = movedKey || afterSlots[changedIndex] || beforeSlots[changedIndex]
+  if (!cardKey) return null
+  const sourceSlot = beforeSlots.indexOf(cardKey)
+  const targetSlot = afterSlots.indexOf(cardKey)
+  if (sourceSlot < 0 || targetSlot < 0 || sourceSlot === targetSlot) return null
+  const exchangeCardKey = beforeSlots[targetSlot] && beforeSlots[targetSlot] !== cardKey ? beforeSlots[targetSlot] : null
+  return { kind: 'layout', playerId, cardKey, sourceSlot, targetSlot, exchangeCardKey }
+}
 
 function readNickname() {
   try {
@@ -227,6 +300,10 @@ export function OnlinePage() {
   const audioRetryTimerRef = useRef<number | null>(null)
   const battleAnimationIdRef = useRef(0)
   const battleAnimationTimerRef = useRef<number | null>(null)
+  const battleAnimationRef = useRef<BattleAnimation | null>(null)
+  const battleAnimationQueueRef = useRef<BattleAnimation[]>([])
+  const recentBattleAnimationKeysRef = useRef(new Map<string, number>())
+  const pendingLocalLayoutKeysRef = useRef(new Map<string, number>())
   const [boardSlots, setBoardSlots] = useState<Array<string | null>>(() => Array(MAX_HAND_SLOTS).fill(null))
   const [draggingKey, setDraggingKey] = useState<string | null>(null)
   const [dragOverSlot, setDragOverSlot] = useState<number | null>(null)
@@ -250,22 +327,58 @@ export function OnlinePage() {
   const roundRef = useRef<OnlineRoundStart | null>(round)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
 
+  const clearBattleAnimations = useCallback(() => {
+    battleAnimationQueueRef.current.length = 0
+    recentBattleAnimationKeysRef.current.clear()
+    pendingLocalLayoutKeysRef.current.clear()
+    battleAnimationRef.current = null
+    if (battleAnimationTimerRef.current !== null) window.clearTimeout(battleAnimationTimerRef.current)
+    battleAnimationTimerRef.current = null
+    setBattleAnimation(null)
+  }, [])
+
   const showBattleAnimation = useCallback((payload: BattleAnimationPayload) => {
+    const key = battleAnimationKey(payload)
+    const now = Date.now()
+    for (const [recentKey, timestamp] of recentBattleAnimationKeysRef.current) {
+      if (now - timestamp >= BATTLE_ANIMATION_DEDUPE_WINDOW_MS) recentBattleAnimationKeysRef.current.delete(recentKey)
+    }
+    const active = battleAnimationRef.current
+    if (active && battleAnimationKey(active) === key) return
+    if (battleAnimationQueueRef.current.some((queued) => battleAnimationKey(queued) === key)) return
+    const previousTimestamp = recentBattleAnimationKeysRef.current.get(key)
+    if (previousTimestamp !== undefined && now - previousTimestamp < BATTLE_ANIMATION_DEDUPE_WINDOW_MS) return
+    recentBattleAnimationKeysRef.current.set(key, now)
+
     const id = battleAnimationIdRef.current + 1
     battleAnimationIdRef.current = id
-    setBattleAnimation({ ...payload, id } as BattleAnimation)
+    const next = { ...payload, id } as BattleAnimation
+    if (active) {
+      battleAnimationQueueRef.current.push(next)
+      if (battleAnimationQueueRef.current.length > MAX_BATTLE_ANIMATION_QUEUE) battleAnimationQueueRef.current.shift()
+      return
+    }
+    battleAnimationRef.current = next
+    setBattleAnimation(next)
   }, [])
 
   useEffect(() => {
     if (!battleAnimation) return
     if (battleAnimationTimerRef.current !== null) window.clearTimeout(battleAnimationTimerRef.current)
-    battleAnimationTimerRef.current = window.setTimeout(() => {
+    const animationId = battleAnimation.id
+    const timer = window.setTimeout(() => {
+      if (battleAnimationRef.current?.id !== animationId) return
       battleAnimationTimerRef.current = null
-      setBattleAnimation(null)
-    }, 2_400)
+      const next = battleAnimationQueueRef.current.shift() || null
+      battleAnimationRef.current = next
+      setBattleAnimation(next)
+    }, BATTLE_ANIMATION_DURATION_MS)
+    battleAnimationTimerRef.current = timer
     return () => {
-      if (battleAnimationTimerRef.current !== null) window.clearTimeout(battleAnimationTimerRef.current)
-      battleAnimationTimerRef.current = null
+      if (battleAnimationTimerRef.current === timer) {
+        window.clearTimeout(timer)
+        battleAnimationTimerRef.current = null
+      }
     }
   }, [battleAnimation])
 
@@ -376,15 +489,15 @@ export function OnlinePage() {
           for (const playerId of ['A', 'B'] as const) {
             const before = previousRoom?.players[playerId]?.layoutCardKeys
             const after = incoming.room.players[playerId]?.layoutCardKeys
-            if (!before || !after || before.length !== after.length) continue
-            const changedIndex = after.findIndex((key, index) => key !== before[index] && key)
-            if (changedIndex >= 0) {
-              showBattleAnimation({
-                kind: 'layout',
-                playerId,
-                cardKey: after[changedIndex] || before[changedIndex] || '',
-                targetSlot: changedIndex,
-              })
+            const layoutAnimation = createLayoutAnimation(before, after, playerId)
+            if (layoutAnimation) {
+              const key = battleAnimationKey(layoutAnimation)
+              const pendingUntil = pendingLocalLayoutKeysRef.current.get(key)
+              if (pendingUntil !== undefined) {
+                pendingLocalLayoutKeysRef.current.delete(key)
+                if (pendingUntil >= Date.now()) continue
+              }
+              showBattleAnimation(layoutAnimation)
             }
           }
           phaseRef.current = incoming.room.phase
@@ -425,6 +538,7 @@ export function OnlinePage() {
           })
           break
         case 'roundStart':
+          clearBattleAnimations()
           setRound(incoming)
           setLastResult(null)
           setMatchOver(null)
@@ -442,9 +556,11 @@ export function OnlinePage() {
           } else {
             setOpponentClaim({ cardKey: incoming.cardKey, correct: incoming.correct })
           }
-          if (!incoming.correct) {
-            showBattleAnimation({ kind: 'wrong', playerId: incoming.playerId, cardKey: incoming.cardKey })
-          }
+          showBattleAnimation({
+            kind: incoming.correct ? 'claim' : 'wrong',
+            playerId: incoming.playerId,
+            cardKey: incoming.cardKey,
+          })
           if (!incoming.correct) setRound(null)
           break
         case 'cardTransfer':
@@ -468,6 +584,9 @@ export function OnlinePage() {
           })
           break
         case 'roundResult':
+          if (incoming.cardKey && incoming.reason !== 'wrong') {
+            showBattleAnimation({ kind: 'discard', winner: incoming.winner, cardKey: incoming.cardKey })
+          }
           setLastResult(incoming)
           setRound(null)
           setMyClaim(null)
@@ -487,7 +606,7 @@ export function OnlinePage() {
             setRound(null)
             setLastResult(null)
             setMatchOver(null)
-            setBattleAnimation(null)
+            clearBattleAnimations()
             void socket.send({ t: 'listRooms' })
           }
           break
@@ -505,7 +624,7 @@ export function OnlinePage() {
       offStatus()
       socket.close()
     }
-  }, [showBattleAnimation, socket])
+  }, [clearBattleAnimations, showBattleAnimation, socket])
 
   useEffect(() => {
     const audio = new Audio()
@@ -817,7 +936,7 @@ export function OnlinePage() {
     setRound(null)
     setLastResult(null)
     setMatchOver(null)
-    setBattleAnimation(null)
+    clearBattleAnimations()
     setMyClaim(null)
     setOpponentClaim(null)
     setDraftSelection(new Set())
@@ -827,7 +946,7 @@ export function OnlinePage() {
     setPinMode(false)
     setMessage(null)
     void socket.connect().then(() => socket.send({ t: 'listRooms' }))
-  }, [socket])
+  }, [clearBattleAnimations, socket])
 
   const moveCardToSlot = useCallback(
     (sourceKey: string, targetSlot: number) => {
@@ -835,12 +954,15 @@ export function OnlinePage() {
       const target = Math.max(0, Math.min(MAX_HAND_SLOTS - 1, Math.round(targetSlot)))
       const sourceIndex = boardSlots.indexOf(sourceKey)
       if (sourceIndex < 0 || sourceIndex === target) return
-      showBattleAnimation({
-        kind: 'layout',
-        playerId: roomRef.current?.you || 'A',
-        cardKey: sourceKey,
-        targetSlot: target,
-      })
+      const preview = [...boardSlots]
+      const displaced = preview[target]
+      preview[target] = sourceKey
+      preview[sourceIndex] = displaced && displaced !== sourceKey ? displaced : null
+      const layoutAnimation = createLayoutAnimation(boardSlots, preview, roomRef.current?.you || 'A')
+      if (layoutAnimation) {
+        pendingLocalLayoutKeysRef.current.set(battleAnimationKey(layoutAnimation), Date.now() + BATTLE_ANIMATION_LOCAL_ECHO_WINDOW_MS)
+        showBattleAnimation(layoutAnimation)
+      }
       setBoardSlots((previous) => {
         const next = [...previous]
         const currentIndex = next.indexOf(sourceKey)
@@ -1767,29 +1889,54 @@ function BattleAnimationOverlay({ event, room }: { event: BattleAnimation | null
   if (!event) return null
   const card = room.cards.find((item) => item.key === event.cardKey)
   if (!card) return null
+  const exchangeCard = event.kind === 'layout' && event.exchangeCardKey
+    ? room.cards.find((item) => item.key === event.exchangeCardKey) || null
+    : null
+  const playerId = event.kind === 'transfer' ? event.to : event.kind === 'discard' ? event.winner : event.playerId
 
   const title =
-    event.kind === 'wrong'
-      ? `${playerName(room, event.playerId)} 选错了`
-      : event.kind === 'transfer'
-        ? `${playerName(room, event.from)} → ${playerName(room, event.to)} 交牌`
-        : `${playerName(room, event.playerId)} 调整牌位`
+    event.kind === 'claim'
+      ? `${playerName(room, event.playerId)} 取到了牌`
+      : event.kind === 'wrong'
+        ? `${playerName(room, event.playerId)} 选错了`
+        : event.kind === 'transfer'
+          ? `${playerName(room, event.from)} → ${playerName(room, event.to)} 交牌`
+          : event.kind === 'discard'
+            ? `${event.winner ? playerName(room, event.winner) : '无人'} ${event.winner ? '的牌' : '选中的牌'}进入弃牌堆`
+            : `${playerName(room, event.playerId)} 调整牌位`
   const detail =
-    event.kind === 'wrong'
-      ? '错误标记 · 目标牌仍留在场上'
-      : event.kind === 'transfer'
-        ? event.automatic
-          ? '超时自动交牌'
-          : '休息阶段交牌'
-        : event.targetSlot === null
-          ? '交换到新的位置'
-          : `放入第 ${event.targetSlot + 1} 个槽位`
+    event.kind === 'claim'
+      ? '正确抢牌 · 正在结算'
+      : event.kind === 'wrong'
+        ? '错误标记 · 目标牌仍留在场上'
+        : event.kind === 'transfer'
+          ? event.automatic
+            ? '超时自动交牌'
+            : '休息阶段交牌'
+          : event.kind === 'discard'
+            ? event.winner
+              ? `放入${playerName(room, event.winner)}的弃牌堆`
+              : '无人收取 · 放入公共弃牌堆'
+            : event.exchangeCardKey
+              ? `第 ${event.sourceSlot + 1} 与第 ${(event.targetSlot || 0) + 1} 个槽位交换`
+              : event.targetSlot === null
+                ? '交换到新的位置'
+                : `放入第 ${event.targetSlot + 1} 个槽位`
+  const tileGroupStyle = exchangeCard ? { display: 'flex', alignItems: 'center', gap: '8px' } : undefined
 
   return (
-    <div key={event.id} className={`online-battle-animation online-battle-animation-${event.kind} player-${event.kind === 'transfer' ? event.to : event.playerId}`} role="status" aria-live="polite">
+    <div key={event.id} className={`online-battle-animation online-battle-animation-${event.kind}${playerId ? ` player-${playerId}` : ''}`} role="status" aria-live="polite">
       <div className="online-battle-animation-card">
         <strong>{title}</strong>
-        <OnlineCardTile meta={card} available={false} readOnly wrong={event.kind === 'wrong'} showNumber={false} />
+        <div style={tileGroupStyle}>
+          <OnlineCardTile meta={card} available={false} readOnly result={event.kind === 'claim' || event.kind === 'discard'} wrong={event.kind === 'wrong'} showNumber={false} />
+          {exchangeCard ? (
+            <>
+              <span aria-hidden="true">↔</span>
+              <OnlineCardTile meta={exchangeCard} available={false} readOnly showNumber={false} />
+            </>
+          ) : null}
+        </div>
         <span>{detail}</span>
       </div>
     </div>

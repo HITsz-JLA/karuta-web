@@ -1674,6 +1674,8 @@ body:has(.online-page) .btn-ghost {
 .online-page .online-card-tile.dragging {
   opacity: 0.48;
   transform: scale(0.96) rotate(-2deg);
+  animation: online-card-drag-lift 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  will-change: transform, opacity;
 }
 
 .online-page .online-card-tile.drop-target {
@@ -1681,11 +1683,42 @@ body:has(.online-page) .btn-ghost {
   border-style: solid;
   box-shadow: 0 0 0 3px rgba(100, 217, 255, 0.18), 0 14px 30px rgba(100, 217, 255, 0.22);
   transform: translateY(-5px) scale(1.015);
+  animation: online-slot-target 760ms ease-in-out infinite alternate;
+  will-change: transform;
 }
 
 .online-card-tile.picked {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(47, 125, 74, 0.13);
+}
+
+.online-page .online-card-tile.picked {
+  animation: online-card-pick 560ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  will-change: transform, box-shadow;
+}
+
+.online-page .online-card-tile.picked::before {
+  position: absolute;
+  inset: -45%;
+  z-index: 2;
+  background: linear-gradient(112deg, transparent 38%, rgba(255, 255, 255, 0.62) 50%, transparent 62%);
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-70%) rotate(18deg);
+  animation: online-card-pick-sheen 560ms ease-out both;
+}
+
+.online-page .online-card-tile.wrong {
+  border-color: rgba(100, 217, 255, 0.86);
+  box-shadow: 0 0 0 2px rgba(100, 217, 255, 0.16), 0 0 22px rgba(100, 217, 255, 0.2);
+  animation: online-card-wrong-shake 620ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  will-change: transform, box-shadow;
+}
+
+.online-page .hand-area.mine .online-card-tile.wrong {
+  border-color: rgba(255, 100, 199, 0.9);
+  box-shadow: 0 0 0 2px rgba(255, 100, 199, 0.16), 0 0 22px rgba(255, 100, 199, 0.2);
 }
 
 .online-page .online-card-tile.pinned {
@@ -1702,6 +1735,22 @@ body:has(.online-page) .btn-ghost {
   opacity: 1;
   border-color: var(--accent);
   box-shadow: 0 10px 24px rgba(47, 125, 74, 0.2);
+}
+
+.online-page .online-card-tile.result::after {
+  position: absolute;
+  z-index: 3;
+  inset: -18%;
+  width: auto;
+  height: auto;
+  border-radius: 50%;
+  background: radial-gradient(circle, transparent 42%, rgba(255, 225, 126, 0.34) 58%, rgba(255, 100, 199, 0.18) 72%, transparent 78%);
+  box-shadow: none;
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.55);
+  animation: online-result-aura 1.8s ease-out both;
 }
 
 .online-page .online-card-tile.claimed {
@@ -2488,6 +2537,8 @@ body:has(.online-page) .btn-ghost {
 .online-match-board .hand-area.giving {
   border-color: rgba(255, 225, 126, 0.88);
   box-shadow: 0 0 0 2px rgba(255, 225, 126, 0.12), 0 0 26px rgba(255, 225, 126, 0.12);
+  animation: online-giving-pulse 1000ms ease-in-out infinite alternate;
+  will-change: box-shadow;
 }
 
 .online-match-board .hand-area.giving .online-card-tile {
@@ -3121,6 +3172,9 @@ body:has(.online-match-page) {
 }
 
 .online-battle-animation-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   display: grid;
   justify-items: center;
   gap: 7px;
@@ -3133,6 +3187,39 @@ body:has(.online-match-page) {
   box-shadow: 0 18px 50px rgba(4, 6, 35, 0.48), 0 0 35px rgba(255, 100, 199, 0.2);
   text-align: center;
   animation: online-battle-flight 2.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  will-change: transform, opacity;
+}
+
+.online-battle-animation-card::before {
+  position: absolute;
+  z-index: 0;
+  inset: -42%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 225, 126, 0.42), rgba(255, 100, 199, 0.16) 35%, transparent 70%);
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  animation: online-battle-aura 2.4s ease-out both;
+}
+
+.online-battle-animation-card::after {
+  position: absolute;
+  z-index: 2;
+  top: -55%;
+  left: -42%;
+  width: 28%;
+  height: 210%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(20deg) translateX(-260%);
+  animation: online-battle-sheen 2.4s ease-out both;
+}
+
+.online-battle-animation-card > * {
+  position: relative;
+  z-index: 1;
 }
 
 .online-battle-animation-card > strong {
@@ -3160,6 +3247,10 @@ body:has(.online-match-page) {
   color: #72eaff;
 }
 
+.online-battle-animation-wrong .online-battle-animation-card {
+  animation-name: online-battle-wrong-flight;
+}
+
 .online-battle-animation-transfer.player-A .online-battle-animation-card,
 .online-battle-animation-layout.player-A .online-battle-animation-card {
   border-color: rgba(100, 217, 255, 0.75);
@@ -3168,6 +3259,14 @@ body:has(.online-match-page) {
 .online-battle-animation-transfer.player-B .online-battle-animation-card,
 .online-battle-animation-layout.player-B .online-battle-animation-card {
   border-color: rgba(255, 100, 199, 0.78);
+}
+
+.online-battle-animation-transfer .online-battle-animation-card {
+  animation-name: online-battle-transfer-flight;
+}
+
+.online-battle-animation-layout .online-battle-animation-card {
+  animation-name: online-battle-layout-flight;
 }
 
 @keyframes online-battle-flight {
@@ -3192,12 +3291,140 @@ body:has(.online-match-page) {
   }
 }
 
+@keyframes online-battle-wrong-flight {
+  0% {
+    opacity: 0;
+    transform: translateY(35px) scale(0.78) rotate(-5deg);
+  }
+
+  14% {
+    opacity: 1;
+    transform: translateY(0) scale(1.03) rotate(1deg);
+  }
+
+  25%,
+  38%,
+  51% {
+    opacity: 1;
+    transform: translateX(-5px) rotate(-1deg) scale(1);
+  }
+
+  32%,
+  45%,
+  58% {
+    opacity: 1;
+    transform: translateX(5px) rotate(1deg) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-62px) scale(0.86) rotate(3deg);
+  }
+}
+
+@keyframes online-battle-transfer-flight {
+  0% {
+    opacity: 0;
+    transform: translate(66px, 34px) scale(0.76) rotate(6deg);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1.04) rotate(-1deg);
+  }
+
+  68% {
+    opacity: 1;
+    transform: translate(-4px, -12px) scale(1) rotate(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-58px, -70px) scale(0.82) rotate(-5deg);
+  }
+}
+
+@keyframes online-battle-layout-flight {
+  0% {
+    opacity: 0;
+    transform: translateY(26px) scale(0.8) rotate(-7deg);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translateY(0) scale(1.05) rotate(2deg);
+  }
+
+  66% {
+    opacity: 1;
+    transform: translateY(-8px) scale(1) rotate(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-58px) scale(0.84) rotate(4deg);
+  }
+}
+
+@keyframes online-battle-aura {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.72) rotate(-12deg);
+  }
+
+  18% {
+    opacity: 0.92;
+    transform: scale(1) rotate(0);
+  }
+
+  66% {
+    opacity: 0.34;
+    transform: scale(1.14) rotate(8deg);
+  }
+}
+
+@keyframes online-battle-sheen {
+  0%,
+  28% {
+    opacity: 0;
+    transform: rotate(20deg) translateX(-260%);
+  }
+
+  43% {
+    opacity: 0.85;
+  }
+
+  64%,
+  100% {
+    opacity: 0;
+    transform: rotate(20deg) translateX(640%);
+  }
+}
+
 .online-discard-flight {
   position: relative;
+  isolation: isolate;
   display: grid;
   justify-items: center;
   gap: 5px;
   min-width: 0;
+}
+
+.online-discard-flight::before {
+  position: absolute;
+  z-index: -1;
+  top: 24%;
+  left: 50%;
+  width: 72%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(255, 225, 126, 0.5);
+  border-radius: 50%;
+  box-shadow: 0 0 26px rgba(255, 225, 126, 0.3);
+  content: '';
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.35);
+  animation: online-discard-ring 5.4s ease-out both;
 }
 
 .online-discard-flight .online-card-tile {
@@ -3234,6 +3461,137 @@ body:has(.online-match-page) {
   100% {
     opacity: 0;
     transform: translateY(-18px) scale(0.86) rotate(2deg);
+  }
+}
+
+@keyframes online-discard-ring {
+  0%,
+  14% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.35);
+  }
+
+  24% {
+    opacity: 0.78;
+  }
+
+  55%,
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+}
+
+@keyframes online-result-aura {
+  0% {
+    opacity: 0;
+    transform: scale(0.55) rotate(-8deg);
+  }
+
+  24% {
+    opacity: 0.96;
+    transform: scale(0.9) rotate(0);
+  }
+
+  68% {
+    opacity: 0.34;
+    transform: scale(1.14) rotate(8deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.38) rotate(16deg);
+  }
+}
+
+@keyframes online-card-pick {
+  0% {
+    transform: translateZ(0) scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 225, 126, 0);
+  }
+
+  34% {
+    transform: translateY(-10px) scale(1.045) rotate(-0.8deg);
+    box-shadow: 0 0 0 3px rgba(255, 225, 126, 0.2), 0 14px 30px rgba(255, 100, 199, 0.24);
+  }
+
+  68% {
+    transform: translateY(-3px) scale(1.015) rotate(0.2deg);
+    box-shadow: 0 0 0 2px rgba(255, 225, 126, 0.16), 0 8px 20px rgba(100, 217, 255, 0.16);
+  }
+
+  100% {
+    transform: translateZ(0) scale(1);
+    box-shadow: 0 0 0 2px rgba(255, 225, 126, 0.12);
+  }
+}
+
+@keyframes online-card-pick-sheen {
+  0% {
+    opacity: 0;
+    transform: translateX(-75%) rotate(18deg);
+  }
+
+  34% {
+    opacity: 0.9;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(76%) rotate(18deg);
+  }
+}
+
+@keyframes online-card-wrong-shake {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0);
+  }
+
+  18% {
+    transform: translateX(-5px) rotate(-1deg);
+  }
+
+  36% {
+    transform: translateX(5px) rotate(1deg);
+  }
+
+  54% {
+    transform: translateX(-4px) rotate(-0.7deg);
+  }
+
+  72% {
+    transform: translateX(3px) rotate(0.5deg);
+  }
+}
+
+@keyframes online-card-drag-lift {
+  from {
+    transform: translateY(0) scale(1) rotate(0);
+  }
+
+  to {
+    transform: translateY(-8px) scale(1.02) rotate(-1deg);
+  }
+}
+
+@keyframes online-slot-target {
+  from {
+    transform: translateY(-5px) scale(1.015);
+  }
+
+  to {
+    transform: translateY(-8px) scale(1.028);
+  }
+}
+
+@keyframes online-giving-pulse {
+  from {
+    box-shadow: 0 0 0 2px rgba(255, 225, 126, 0.12), 0 0 26px rgba(255, 225, 126, 0.12);
+  }
+
+  to {
+    box-shadow: 0 0 0 4px rgba(255, 225, 126, 0.2), 0 0 36px rgba(255, 100, 199, 0.2);
   }
 }
 
@@ -3568,7 +3926,17 @@ body:has(.online-match-page) {
 
 @media (prefers-reduced-motion: reduce) {
   .online-card-wrong,
+  .online-page .online-card-tile.picked,
+  .online-page .online-card-tile.picked::before,
+  .online-page .online-card-tile.wrong,
+  .online-page .online-card-tile.result::after,
+  .online-page .online-card-tile.dragging,
+  .online-page .online-card-tile.drop-target,
+  .online-match-board .hand-area.giving,
   .online-battle-animation-card,
+  .online-battle-animation-card::before,
+  .online-battle-animation-card::after,
+  .online-discard-flight::before,
   .online-discard-flight .online-card-tile,
   .online-spectator-over,
   .online-spectator-stage.resting {
