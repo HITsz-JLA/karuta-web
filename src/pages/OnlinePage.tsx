@@ -11,7 +11,7 @@ import {
   type OnlineRoomView,
   type OnlineServerMessage,
 } from '../lib/onlineProtocol'
-import { OnlineSocket } from '../lib/onlineSocket'
+import { OnlineSocket, type OnlineDisconnectReason } from '../lib/onlineSocket'
 import {
   CURATED_SERVER_PACKAGES,
   getServerPackageCatalog,
@@ -29,6 +29,8 @@ const DRAFT_SELECTION_SIZE = 30
 const BAN_SIZE = 5
 const MAX_HAND_SLOTS = 33
 const REST_AUDIO_VOLUME = 0.28
+const ONLINE_VOLUME_STORAGE_KEY = 'karuta-online-volume'
+const DEFAULT_ONLINE_VOLUME = 0.8
 const EMPTY_CARD_KEYS: string[] = []
 const COUNTDOWN_EARLY_WAKE_MS = 24
 
@@ -75,6 +77,21 @@ function readBattleStyle(): BattleStyle {
     return localStorage.getItem(BATTLE_STYLE_STORAGE_KEY) === 'text' ? 'text' : 'card'
   } catch {
     return 'card'
+  }
+}
+
+function clampOnlineVolume(value: number) {
+  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : DEFAULT_ONLINE_VOLUME))
+}
+
+function readOnlineVolume() {
+  try {
+    const raw = localStorage.getItem(ONLINE_VOLUME_STORAGE_KEY)
+    if (raw === null) return DEFAULT_ONLINE_VOLUME
+    const stored = Number(raw)
+    return Number.isFinite(stored) ? clampOnlineVolume(stored) : DEFAULT_ONLINE_VOLUME
+  } catch {
+    return DEFAULT_ONLINE_VOLUME
   }
 }
 
@@ -289,12 +306,15 @@ export function OnlinePage() {
   const [arrangeReadyRemaining, setArrangeReadyRemaining] = useState(0)
   const [restReadyRemaining, setRestReadyRemaining] = useState(0)
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('idle')
+  const [onlineVolume, setOnlineVolumeState] = useState(readOnlineVolume)
   const [connected, setConnected] = useState(socket.connected)
+  const [disconnectReason, setDisconnectReason] = useState<OnlineDisconnectReason | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const roomRef = useRef<OnlineRoomView | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
+  const onlineVolumeRef = useRef(onlineVolume)
   const audioUnlockedRef = useRef(false)
   const audioUnlockingRef = useRef(false)
   const audioGenerationRef = useRef(0)
@@ -425,6 +445,17 @@ export function OnlinePage() {
       })
     return () => {
       cancelled = true
+    }
+  }, [])
+
+  const setOnlineVolume = useCallback((value: number) => {
+    const nextVolume = clampOnlineVolume(value)
+    onlineVolumeRef.current = nextVolume
+    setOnlineVolumeState(nextVolume)
+    try {
+      localStorage.setItem(ONLINE_VOLUME_STORAGE_KEY, String(nextVolume))
+    } catch {
+      // Persisting the preference is optional.
     }
   }, [])
 
@@ -624,17 +655,23 @@ export function OnlinePage() {
           break
       }
     })
-    const offStatus = socket.onStatus((nextConnected) => {
+    const offStatus = socket.onStatus((nextConnected, reason) => {
       setConnected(nextConnected)
+      setDisconnectReason(nextConnected ? null : reason || 'network')
       if (!nextConnected) {
         // Incremental events may be missed while the socket is down. The next
-        // room snapshot/replay is authoritative, so do not keep showing an
-        // old round timer or claim marker during reconnect.
-        setRound(null)
+        // room snapshot/replay is authoritative. Keep the round visible while
+        // reconnecting so the player is not left with an empty, non-actionable
+        // board; replayed server state will replace it when the socket returns.
         setMyClaim(null)
         setOpponentClaim(null)
         setClaimsByPlayer({ A: null, B: null })
         clearBattleAnimations()
+        setMessage((previous) =>
+          reason === 'replaced' ? '此房间已在其他页面恢复连接，当前页面已停止重连' : previous || '连接已断开，正在尝试恢复对局…',
+        )
+      } else {
+        setMessage((previous) => (previous === '连接已断开，正在尝试恢复对局…' ? null : previous))
       }
     })
     void socket
@@ -681,7 +718,7 @@ export function OnlinePage() {
 
     audio.preload = 'auto'
     audio.muted = false
-    audio.volume = round ? 1 : REST_AUDIO_VOLUME
+    audio.volume = onlineVolumeRef.current * (round ? 1 : REST_AUDIO_VOLUME)
     audio.src = source
     // Start the media request as soon as the round announcement arrives. The
     // server announces ROUND_LEAD_MS before startAt, so normal tracks are
@@ -771,6 +808,12 @@ export function OnlinePage() {
       audio.pause()
     }
   }, [room?.restAudioUrl, round, socket])
+
+  useEffect(() => {
+    onlineVolumeRef.current = onlineVolume
+    const audio = audioRef.current
+    if (audio) audio.volume = onlineVolume * (round ? 1 : REST_AUDIO_VOLUME)
+  }, [onlineVolume, round])
 
   useEffect(() => {
     if (room?.phase !== 'arrange' || !room.draft.arrangeEndsAtServerTime) {
@@ -1407,6 +1450,14 @@ export function OnlinePage() {
   }, [unlockAudio])
 
   const audioButtonLabel = audioStatus === 'blocked' ? '点击恢复音频' : audioStatus === 'error' ? '重试音频' : audioStatus === 'playing' ? '音频播放中' : audioStatus === 'ready' ? '音频已启用' : '启用音频'
+  const reconnectNow = useCallback(() => {
+    setMessage('正在重新连接在线服务…')
+    void socket
+      .reconnect()
+      .then(() => setMessage(null))
+      .catch((error) => setMessage(error instanceof Error ? error.message : '重连失败，系统会继续自动重试'))
+  }, [socket])
+  const canReconnect = !connected && disconnectReason !== 'replaced'
 
   if (!room) {
     return (
@@ -1552,6 +1603,7 @@ export function OnlinePage() {
         claims={claimsByPlayer}
         battleAnimation={battleAnimation}
         connected={connected}
+        onReconnect={reconnectNow}
         restRemaining={restRemaining}
         roundRemaining={roundRemaining}
         arrangeRemaining={arrangeRemaining}
@@ -1559,6 +1611,8 @@ export function OnlinePage() {
         onBattleStyle={setBattleStyle}
         onLeave={leaveRoom}
         socket={socket}
+        volume={onlineVolume}
+        onVolumeChange={setOnlineVolume}
         audioButtonLabel={audioButtonLabel}
         onUnlockAudio={unlockAudio}
         matchOver={matchOver}
@@ -1576,7 +1630,10 @@ export function OnlinePage() {
               <h1>{room.name}</h1>
               <p>房间码 <span className="room-code large">{room.code}</span> · {room.deckName}</p>
             </div>
-            <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出房间</button>
+            <div className="row online-room-actions">
+              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
+              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出房间</button>
+            </div>
           </div>
           <p className="muted small">把房间码分享给对手。双方直接使用服务器牌组看到同一套真实卡面，歌名不会在开局前下发。</p>
         </section>
@@ -1612,7 +1669,10 @@ export function OnlinePage() {
               <h1>第一阶段 · 各自选牌</h1>
               <p>{room.name} · 房间码 <span className="room-code">{room.code}</span></p>
             </div>
-            <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
+            <div className="row online-room-actions">
+              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
+              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
+            </div>
           </div>
           <p>服务器已经把候选牌随机分成两份。请只从你看到的这一份牌池中选择 30 张。</p>
         </section>
@@ -1642,7 +1702,10 @@ export function OnlinePage() {
               <h1>第二阶段 · 互换后 BAN 牌</h1>
               <p>{room.name} · 你正在处理对手选出的 30 张牌</p>
             </div>
-            <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
+            <div className="row online-room-actions">
+              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
+              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
+            </div>
           </div>
           <p>这些是对手选出的牌。请从中 BAN 5 张，剩余 25 张会成为你的起始牌区。</p>
         </section>
@@ -1743,6 +1806,7 @@ export function OnlinePage() {
             <span className={`connection-chip${connected ? ' online' : ''}`}>
               {connected ? '连接稳定' : '正在重连…'}
             </span>
+            {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
             <span className="chip">{matchIsOver ? '本局结束' : round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
             <div className="online-style-switch" role="group" aria-label="对战视图">
               <span className="online-style-caption">视图</span>
@@ -1878,6 +1942,7 @@ export function OnlinePage() {
             ) : null}
             <NetworkFairness socket={socket} you={room.you} compact />
             <div className="online-audio-control">
+              <OnlineVolumeControl volume={onlineVolume} onChange={setOnlineVolume} />
               <button className="btn btn-secondary online-audio-button" type="button" onClick={unlockAudio}>{audioButtonLabel}</button>
               {audioStatus === 'blocked' ? <span className="online-audio-status error" role="alert">浏览器拦截了自动播放，请点击按钮恢复音频。</span> : null}
               {audioStatus === 'error' ? <span className="online-audio-status error" role="alert">音频资源加载失败，请点击重试。</span> : null}
@@ -2039,7 +2104,10 @@ interface SpectatorMatchViewProps {
   battleStyle: BattleStyle
   onBattleStyle: (style: BattleStyle) => void
   onLeave: () => void
+  onReconnect: () => void
   socket: OnlineSocket
+  volume: number
+  onVolumeChange: (volume: number) => void
   audioButtonLabel: string
   onUnlockAudio: () => void
   matchOver: Extract<OnlineServerMessage, { t: 'matchOver' }> | null
@@ -2058,7 +2126,10 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
   battleStyle,
   onBattleStyle,
   onLeave,
+  onReconnect,
   socket,
+  volume,
+  onVolumeChange,
   audioButtonLabel,
   onUnlockAudio,
   matchOver,
@@ -2104,6 +2175,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
           </div>
           <div className="online-game-header-tools">
             <span className="chip">{room.players.A?.connected && room.players.B?.connected ? '双方在线' : '有玩家断线'}</span>
+            {!connected ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={onReconnect}>立即重连</button> : null}
             <div className="online-style-switch" role="group" aria-label="观战视图">
               <span className="online-style-caption">视图</span>
               <button className={`online-style-button${battleStyle === 'text' ? ' active' : ''}`} type="button" aria-pressed={battleStyle === 'text'} onClick={() => onBattleStyle('text')}>文字注重</button>
@@ -2179,6 +2251,7 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
           </section>
           <NetworkFairness socket={socket} you={null} compact />
           <div className="online-audio-control">
+            <OnlineVolumeControl volume={volume} onChange={onVolumeChange} />
             <button className="btn btn-secondary online-audio-button" type="button" onClick={onUnlockAudio}>{audioButtonLabel}</button>
           </div>
         </aside>
@@ -2217,6 +2290,24 @@ const SpectatorMatchView = memo(function SpectatorMatchView({
     </div>
   )
 })
+
+function OnlineVolumeControl({ volume, onChange }: { volume: number; onChange: (volume: number) => void }) {
+  const percentage = Math.round(clampOnlineVolume(volume) * 100)
+  return (
+    <label className="online-volume-control">
+      <span>对局音量 <strong>{percentage}%</strong></span>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={percentage}
+        aria-label="对局音量"
+        onChange={(event) => onChange(Number(event.currentTarget.value) / 100)}
+      />
+    </label>
+  )
+}
 
 interface VirtualServerCardGridProps {
   cards: ServerPackageCatalogCard[]

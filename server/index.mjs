@@ -41,6 +41,10 @@ const metadataDir = path.join(dataDir, '.metadata')
 const port = Number(process.env.PORT || 8787)
 const host = process.env.HOST || '0.0.0.0'
 const websocketHeartbeatMs = 1_000
+// A short main-thread or network pause must not remove a player from the
+// match. The resume window is 90 seconds, so keep the heartbeat guard at ten
+// seconds and let the client-side Pong watchdog reconnect first.
+const websocketMissedPongLimit = 10
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_MB || 2048) * 1024 * 1024
 const onlineRooms = new OnlineRoomManager(dataDir, {
   maxRooms: Number(process.env.ONLINE_MAX_ROOMS || 100),
@@ -556,7 +560,7 @@ websocketServer.on('connection', (socket, request) => {
     socket.karutaPingAt = 0
     if (sentAt) onlineRooms.recordPong(session, Date.now() - sentAt)
   })
-  socket.on('close', () => disconnect('close'))
+  socket.on('close', (code) => disconnect(`close:${code}`))
   socket.on('error', (error) => {
     logOnlineEvent('ws.error', {
       sessionId: session.id,
@@ -573,7 +577,7 @@ const websocketHeartbeatTimer = setInterval(() => {
   for (const socket of websocketServer.clients) {
     if (socket.isAlive === false) {
       socket.karutaMissedPongs = (socket.karutaMissedPongs || 0) + 1
-      if (socket.karutaMissedPongs >= 3) {
+      if (socket.karutaMissedPongs >= websocketMissedPongLimit) {
         logOnlineEvent('ws.heartbeat_timeout', {
           sessionId: socket.karutaSession?.id,
           room: socket.karutaSession?.room?.code,

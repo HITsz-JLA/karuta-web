@@ -2749,6 +2749,12 @@ body:has(.online-page) .btn-ghost {
   gap: 6px;
 }
 
+.online-room-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .online-lobby-audio {
   padding: 6px 9px;
   font-size: 0.72rem;
@@ -2757,6 +2763,40 @@ body:has(.online-page) .btn-ghost {
 .online-audio-control {
   display: grid;
   gap: 4px;
+}
+
+.online-volume-control {
+  display: grid;
+  gap: 4px;
+  padding: 7px 8px;
+  border: 1px solid rgba(151, 143, 255, 0.24);
+  border-radius: 9px;
+  background: rgba(6, 11, 42, 0.22);
+  color: rgba(238, 234, 255, 0.84);
+  font-size: 0.68rem;
+}
+
+.online-volume-control span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.online-volume-control strong {
+  color: var(--online-yellow);
+}
+
+.online-volume-control input {
+  width: 100%;
+  accent-color: var(--online-yellow);
+  cursor: pointer;
+}
+
+.online-reconnect-button {
+  padding: 5px 8px;
+  border-color: rgba(255, 225, 126, 0.78);
+  color: var(--online-yellow);
+  font-size: 0.68rem;
 }
 
 .online-audio-status {
