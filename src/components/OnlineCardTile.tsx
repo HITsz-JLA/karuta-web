@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent } from 'react'
 import { useObjectUrl } from '../hooks/useObjectUrl'
+import { createThumbnailObjectUrl, enqueueImageLoad } from '../lib/imagePreview'
 import type { CardEntry } from '../types/models'
 import type { OnlineCardView } from '../lib/onlineProtocol'
 
@@ -13,6 +14,7 @@ interface Props {
   readOnly?: boolean
   pinned?: boolean
   showNumber?: boolean
+  thumbnail?: boolean
   slotIndex?: number
   stateLabel?: string
   draggable?: boolean
@@ -34,32 +36,34 @@ const CARD_IMAGE_MEMORY_LIMIT = 96
 const cachedImageUrls = new Map<string, string>()
 const pendingImageLoads = new Map<string, Promise<string>>()
 let imageCachePromise: Promise<Cache> | null = null
-let sharedImageObserver: IntersectionObserver | null = null
+const imageObservers = new Map<Element | null, IntersectionObserver>()
 const observedImageTargets = new Map<Element, () => void>()
 
-function observeImageTarget(element: HTMLButtonElement, onVisible: () => void) {
+function observeImageTarget(element: HTMLButtonElement, onVisible: () => void, root: Element | null) {
   if (typeof IntersectionObserver === 'undefined') return undefined
-  if (!sharedImageObserver) {
-    sharedImageObserver = new IntersectionObserver(
+  let observer = imageObservers.get(root)
+  if (!observer) {
+    observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue
           const callback = observedImageTargets.get(entry.target)
           if (!callback) continue
           observedImageTargets.delete(entry.target)
-          sharedImageObserver?.unobserve(entry.target)
+          observer?.unobserve(entry.target)
           callback()
         }
       },
-      { rootMargin: '240px' },
+      { root: root as Element | null, rootMargin: '240px' },
     )
+    imageObservers.set(root, observer)
   }
   observedImageTargets.set(element, onVisible)
-  sharedImageObserver.observe(element)
+  observer.observe(element)
   return () => {
     if (observedImageTargets.get(element) !== onVisible) return
     observedImageTargets.delete(element)
-    sharedImageObserver?.unobserve(element)
+    observer?.unobserve(element)
   }
 }
 
@@ -97,7 +101,7 @@ async function loadCachedImage(imageUrl: string) {
   const pending = pendingImageLoads.get(imageUrl)
   if (pending) return pending
 
-  const load = (async () => {
+  const load = enqueueImageLoad(async () => {
     try {
       const cache = await openImageCache()
       if (!cache) return imageUrl
@@ -114,7 +118,7 @@ async function loadCachedImage(imageUrl: string) {
       // The normal URL remains the safe fallback when Cache Storage is unavailable.
       return imageUrl
     }
-  })()
+  })
   pendingImageLoads.set(imageUrl, load)
   void load.finally(() => {
     if (pendingImageLoads.get(imageUrl) === load) pendingImageLoads.delete(imageUrl)
@@ -122,18 +126,57 @@ async function loadCachedImage(imageUrl: string) {
   return load
 }
 
-function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (element: HTMLButtonElement | null) => void] {
+async function loadCachedThumbnail(imageUrl: string) {
+  const cacheKey = `thumbnail:${imageUrl}`
+  const memoryUrl = cachedImageUrls.get(cacheKey)
+  if (memoryUrl) {
+    cachedImageUrls.delete(cacheKey)
+    cachedImageUrls.set(cacheKey, memoryUrl)
+    return memoryUrl
+  }
+  const pending = pendingImageLoads.get(cacheKey)
+  if (pending) return pending
+
+  const load = enqueueImageLoad(async () => {
+    try {
+      const cache = await openImageCache()
+      let response = cache ? await cache.match(imageUrl) : undefined
+      if (!response) {
+        response = await fetch(imageUrl, { cache: 'force-cache' })
+        if (!response.ok) return imageUrl
+        if (cache) await cache.put(imageUrl, response.clone())
+      }
+      const objectUrl = await createThumbnailObjectUrl(await response.blob())
+      rememberImageUrl(cacheKey, objectUrl)
+      return objectUrl
+    } catch {
+      return imageUrl
+    }
+  })
+  pendingImageLoads.set(cacheKey, load)
+  void load.finally(() => {
+    if (pendingImageLoads.get(cacheKey) === load) pendingImageLoads.delete(cacheKey)
+  })
+  return load
+}
+
+function useCachedImageUrl(
+  imageUrl: string | undefined,
+  thumbnail = false,
+): [string | undefined, (element: HTMLButtonElement | null) => void] {
   const imageTargetRef = useRef<HTMLButtonElement | null>(null)
   const setImageTarget = useCallback((element: HTMLButtonElement | null) => {
     imageTargetRef.current = element
   }, [])
   const [shouldLoad, setShouldLoad] = useState(() => {
     if (!imageUrl) return false
-    return typeof IntersectionObserver === 'undefined' || cachedImageUrls.has(imageUrl)
+    const cacheKey = thumbnail ? `thumbnail:${imageUrl}` : imageUrl
+    return typeof IntersectionObserver === 'undefined' || cachedImageUrls.has(cacheKey)
   })
   const [cachedImage, setCachedImage] = useState<{ source: string; url: string } | null>(() => {
     if (!imageUrl) return null
-    const memoryUrl = cachedImageUrls.get(imageUrl)
+    const cacheKey = thumbnail ? `thumbnail:${imageUrl}` : imageUrl
+    const memoryUrl = cachedImageUrls.get(cacheKey)
     return memoryUrl ? { source: imageUrl, url: memoryUrl } : null
   })
 
@@ -143,14 +186,16 @@ function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (
       return
     }
     const target = imageTargetRef.current
-    if (cachedImageUrls.has(imageUrl) || typeof IntersectionObserver === 'undefined' || !target) {
+    const cacheKey = thumbnail ? `thumbnail:${imageUrl}` : imageUrl
+    if (cachedImageUrls.has(cacheKey) || typeof IntersectionObserver === 'undefined' || !target) {
       setShouldLoad(true)
       return
     }
 
     setShouldLoad(false)
-    return observeImageTarget(target, () => setShouldLoad(true))
-  }, [imageUrl])
+    const root = target.closest('.online-select-viewport, .draft-card-grid')
+    return observeImageTarget(target, () => setShouldLoad(true), root)
+  }, [imageUrl, thumbnail])
 
   useEffect(() => {
     let active = true
@@ -160,7 +205,8 @@ function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (
         active = false
       }
     }
-    const memoryUrl = cachedImageUrls.get(imageUrl)
+    const cacheKey = thumbnail ? `thumbnail:${imageUrl}` : imageUrl
+    const memoryUrl = cachedImageUrls.get(cacheKey)
     if (memoryUrl) {
       setCachedImage({ source: imageUrl, url: memoryUrl })
       return () => {
@@ -168,13 +214,13 @@ function useCachedImageUrl(imageUrl: string | undefined): [string | undefined, (
       }
     }
     setCachedImage(null)
-    void loadCachedImage(imageUrl).then((nextUrl) => {
+    void (thumbnail ? loadCachedThumbnail(imageUrl) : loadCachedImage(imageUrl)).then((nextUrl) => {
       if (active) setCachedImage({ source: imageUrl, url: nextUrl })
     })
     return () => {
       active = false
     }
-  }, [imageUrl, shouldLoad])
+  }, [imageUrl, shouldLoad, thumbnail])
 
   if (!cachedImage || cachedImage.source !== imageUrl) return [undefined, setImageTarget]
   return [cachedImage.url, setImageTarget]
@@ -201,6 +247,7 @@ function areOnlineCardTilePropsEqual(previous: Props, next: Props) {
     previous.readOnly === next.readOnly &&
     previous.pinned === next.pinned &&
     previous.showNumber === next.showNumber &&
+    previous.thumbnail === next.thumbnail &&
     previous.slotIndex === next.slotIndex &&
     previous.stateLabel === next.stateLabel &&
     previous.draggable === next.draggable &&
@@ -229,6 +276,7 @@ export const OnlineCardTile = memo(function OnlineCardTile({
   readOnly = false,
   pinned = false,
   showNumber = true,
+  thumbnail = false,
   slotIndex,
   stateLabel,
   draggable = false,
@@ -245,7 +293,7 @@ export const OnlineCardTile = memo(function OnlineCardTile({
   onClick,
 }: Props) {
   const localImageUrl = useObjectUrl(card?.imageBlobKey)
-  const [cachedRemoteImageUrl, imageTargetRef] = useCachedImageUrl(meta.imageUrl)
+  const [cachedRemoteImageUrl, imageTargetRef] = useCachedImageUrl(meta.imageUrl, thumbnail)
   const imageUrl = cachedRemoteImageUrl || localImageUrl
   const interactive = !readOnly && (draggable || (available && Boolean(onClick)))
   const className = [
