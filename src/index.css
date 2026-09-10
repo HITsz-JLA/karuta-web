@@ -3138,6 +3138,18 @@ body:has(.online-match-page) {
   text-shadow: 0 0 8px rgba(255, 100, 199, 0.94), 0 0 22px rgba(255, 100, 199, 0.55);
 }
 
+/* Wrong-claim markers follow the real seat identity in spectator mode,
+   instead of the local viewer's top/bottom perspective. */
+.online-page .hand-area.player-a .online-card-wrong {
+  color: #72eaff;
+  text-shadow: 0 0 8px rgba(100, 217, 255, 0.94), 0 0 22px rgba(100, 217, 255, 0.55);
+}
+
+.online-page .hand-area.player-b .online-card-wrong {
+  color: #ff9ed5;
+  text-shadow: 0 0 8px rgba(255, 100, 199, 0.94), 0 0 22px rgba(255, 100, 199, 0.55);
+}
+
 @keyframes online-wrong-mark {
   0% {
     opacity: 0;

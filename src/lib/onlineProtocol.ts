@@ -49,6 +49,8 @@ export interface OnlineDraftView {
   selectedCardKeys: string[]
   exchangeCardKeys: string[]
   bannedCardKeys: string[]
+  selectedCount: number
+  bannedCount: number
   selectionSize: number
   banSize: number
   opponentSelectedCount: number
@@ -60,6 +62,7 @@ export interface OnlinePendingTransferView {
   from: OnlinePlayerId
   to: OnlinePlayerId
   reason: 'wrong_claim' | 'opponent_card'
+  cardKey: string | null
   expiresAtServerTime: number
 }
 
@@ -68,7 +71,7 @@ export interface OnlineRoomView {
   name: string
   packageId: string
   deckName: string
-  you: OnlinePlayerId
+  you: OnlinePlayerId | null
   spectator: boolean
   phase: OnlineRoomPhase
   players: Record<OnlinePlayerId, OnlinePlayerView | null>
@@ -90,7 +93,7 @@ export interface OnlineRoomSummary {
   name: string
   deckName: string
   players: number
-  status: 'waiting' | 'full' | 'playing'
+  status: 'waiting' | 'full' | 'preparing' | 'playing'
 }
 
 export type OnlineClientMessage =
