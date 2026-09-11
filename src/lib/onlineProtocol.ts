@@ -14,6 +14,7 @@ export interface OnlinePlayerView {
   id: OnlinePlayerId
   nickname: string
   connected: boolean
+  audioReady: boolean
   ready: boolean
   arrangeReady: boolean
   restReady: boolean
@@ -115,8 +116,15 @@ export type OnlineClientMessage =
   | { t: 'arrangeLayout'; cardKeys: Array<string | null> }
   | { t: 'giveCard'; cardKey: string }
   | { t: 'claim'; roundNo: number; cardKey: string; clientAt: number }
+  | { t: 'audioReady'; roundNo: number }
   | { t: 'leaveRoom' }
   | { t: 'ping'; clientAt: number }
+
+export interface OnlineRoundPrepare {
+  t: 'roundPrepare'
+  roundNo: number
+  audioUrl: string
+}
 
 export interface OnlineRoundStart {
   t: 'roundStart'
@@ -142,6 +150,7 @@ export type OnlineServerMessage =
   | { t: 'welcome'; resumed: boolean; resumeToken?: string; resumeRejected?: boolean }
   | { t: 'room'; room: OnlineRoomView }
   | { t: 'roomList'; rooms: OnlineRoomSummary[] }
+  | OnlineRoundPrepare
   | OnlineRoundStart
   | {
       t: 'claimFeedback'

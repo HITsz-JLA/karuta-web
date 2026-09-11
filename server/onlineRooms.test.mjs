@@ -88,6 +88,18 @@ async function prepareMatch(manager, host, guest, hostSocket, guestSocket) {
   return room
 }
 
+async function readyRoundAudio(manager, host, guest, hostSocket) {
+  const prepare = latest(hostSocket, 'roundPrepare')
+  assert.ok(prepare)
+  await manager.handle(host, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+  assert.equal(latest(hostSocket, 'roundStart'), undefined)
+  await manager.handle(guest, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+  const round = latest(hostSocket, 'roundStart')
+  assert.ok(round)
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, round.startAtServerTime - Date.now()) + 25))
+  return round
+}
+
 test('two players can create, join, ready, receive a round and claim a card', async () => {
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-'))
   const manager = new OnlineRoomManager(temp, { maxRooms: 2 })
@@ -126,7 +138,7 @@ test('two players can create, join, ready, receive a round and claim a card', as
     assert.equal(latest(hostSocket, 'room').room.players.A.layoutCardKeys, null)
     assert.deepEqual(latest(guestSocket, 'room').room.players.A.layoutCardKeys, hostLayout)
     await new Promise((resolve) => setTimeout(resolve, 2_850))
-    const round = latest(hostSocket, 'roundStart')
+    const round = await readyRoundAudio(manager, host, guest, hostSocket)
     assert.ok(round)
     assert.match(round.audioUrl, new RegExp(`/api/online/room/${joined.room.code}/audio/`))
     assert.equal('cardKey' in round, false)
@@ -146,6 +158,53 @@ test('two players can create, join, ready, receive a round and claim a card', as
     const result = latest(hostSocket, 'roundResult')
     assert.equal(result.winner, 'A')
     assert.equal(result.song.displayName, room.cardByKey.get(currentKey).songs[0].displayName)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('a round waits for both complete local audio acknowledgements before timing starts', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-audio-ready-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+
+    const prepare = latest(hostSocket, 'roundPrepare')
+    assert.ok(prepare)
+    assert.equal(room.current.startAt, null)
+    assert.equal(room.current.endsAt, null)
+    assert.equal(room.roundTimer, null)
+    assert.equal(latest(hostSocket, 'roundStart'), undefined)
+
+    await manager.handle(host, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+    assert.deepEqual([...room.current.audioReady], ['A'])
+    assert.equal(room.current.startAt, null)
+    assert.equal(room.roundTimer, null)
+    assert.equal(latest(hostSocket, 'roundStart'), undefined)
+
+    await manager.handle(guest, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+    assert.ok(room.current.startAt > Date.now())
+    assert.equal(room.current.endsAt - room.current.startAt, 10_000)
+    assert.ok(room.roundTimer)
+    assert.equal(latest(hostSocket, 'roundStart').roundNo, prepare.roundNo)
+    assert.equal(latest(hostSocket, 'room').room.players.A.audioReady, true)
+    assert.equal(latest(hostSocket, 'room').room.players.B.audioReady, true)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -431,6 +490,7 @@ test('spectators receive a read-only full board and live claim events', async ()
     clearTimeout(room.nextRoundTimer)
     room.nextRoundTimer = null
     room.nextRound()
+    await readyRoundAudio(manager, host, guest, hostSocket)
     assert.equal(latest(spectatorSocket, 'roomList').rooms.find((item) => item.code === room.code)?.status, 'playing')
 
     const hostLayout = [...room.seats.A.handCardKeys, ...Array(8).fill(null)]
@@ -592,7 +652,7 @@ test('claim settlement lets a later high-RTT claim win after compensation', asyn
     const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
     room.startPlaying()
     await new Promise((resolve) => setTimeout(resolve, 2_850))
-    const round = latest(hostSocket, 'roundStart')
+    const round = await readyRoundAudio(manager, host, guest, hostSocket)
     if (room.current.isEmpty) {
       const cardKey = [...room.remaining][0]
       room.current.isEmpty = false
@@ -636,7 +696,7 @@ test('a wrong claim pauses the round until the opponent gives one card', async (
     room.startPlaying()
     await new Promise((resolve) => setTimeout(resolve, 2_850))
 
-    const round = latest(hostSocket, 'roundStart')
+    const round = await readyRoundAudio(manager, host, guest, hostSocket)
     if (room.current.isEmpty) {
       const cardKey = [...room.remaining][0]
       room.current.isEmpty = false
@@ -691,7 +751,7 @@ test('a wrong claim automatically transfers one card when the transfer window ex
     room.startPlaying()
     await new Promise((resolve) => setTimeout(resolve, 2_850))
 
-    const round = latest(hostSocket, 'roundStart')
+    const round = await readyRoundAudio(manager, host, guest, hostSocket)
     if (room.current.isEmpty) {
       const cardKey = [...room.remaining][0]
       room.current.isEmpty = false
@@ -745,6 +805,7 @@ test('empty-song rounds use 20 outside songs once and treat every card click as 
     room.nextRoundTimer = null
     Math.random = () => 0.999
     room.nextRound()
+    await readyRoundAudio(manager, host, guest, hostSocket)
     assert.equal(room.current.isEmpty, true)
     assert.equal(room.current.cardKey, '')
     assert.equal(room.emptyRemainingSongs.length, 19)
@@ -810,6 +871,7 @@ test('both players can ready during rest and start the next round in five second
     clearTimeout(room.nextRoundTimer)
     room.nextRoundTimer = null
     room.nextRound()
+    await readyRoundAudio(manager, host, guest, hostSocket)
     room.current.isEmpty = false
     room.current.cardKey = room.seats.A.handCardKeys[0]
     room.current.song = room.cardByKey.get(room.current.cardKey).songs[0]

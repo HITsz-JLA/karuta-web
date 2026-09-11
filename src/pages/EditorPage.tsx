@@ -41,13 +41,17 @@ export function EditorPage() {
     if (editingId) {
       const found = deck.cards.find((card) => card.id === editingId)
       if (found) {
-        setDraft(structuredClone(found))
+        if (draft?.id !== found.id) setDraft(structuredClone(found))
         return
       }
+      // A newly created card is intentionally not in deck.cards until the
+      // first save. Keep that draft instead of treating it as a stale
+      // selection and clearing the editor immediately.
+      if (draft?.id === editingId) return
     }
     setDraft(null)
     setEditingId(null)
-  }, [deck, editingId])
+  }, [deck, draft?.id, editingId])
 
   const previewUrl = useObjectUrl(draft?.imageBlobKey)
   const sortedCards = useMemo(() => deck?.cards || [], [deck])
@@ -74,6 +78,7 @@ export function EditorPage() {
     // Keep explicit numbers when possible, then renumber gaps by sort
     nextCards.sort((a, b) => a.number - b.number)
     await persist({ ...deck, cards: nextCards })
+    setDraft(normalized)
     setEditingId(normalized.id)
     setStatus('已保存')
     await refreshList()

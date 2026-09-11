@@ -7,11 +7,13 @@ import {
   type OnlinePlayerId,
   type OnlineRoomSummary,
   type OnlineRoundResult,
+  type OnlineRoundPrepare,
   type OnlineRoundStart,
   type OnlineRoomView,
   type OnlineServerMessage,
 } from '../lib/onlineProtocol'
 import { OnlineSocket, type OnlineDisconnectReason } from '../lib/onlineSocket'
+import { preloadOnlineAudio } from '../lib/onlineAudio'
 import {
   CURATED_SERVER_PACKAGES,
   getServerPackageCatalog,
@@ -34,7 +36,7 @@ const DEFAULT_ONLINE_VOLUME = 0.8
 const EMPTY_CARD_KEYS: string[] = []
 const COUNTDOWN_EARLY_WAKE_MS = 24
 
-type AudioStatus = 'idle' | 'ready' | 'loading' | 'playing' | 'blocked' | 'error'
+type AudioStatus = 'idle' | 'ready' | 'loaded' | 'loading' | 'playing' | 'blocked' | 'error'
 type BattleStyle = 'text' | 'card'
 
 const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
@@ -118,6 +120,39 @@ function createSilentAudioUrl() {
   view.setUint32(40, sampleCount, true)
   new Uint8Array(buffer, 44).fill(128)
   return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }))
+}
+
+function waitForMediaReady(audio: HTMLAudioElement): Promise<void> {
+  if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const cleanup = () => {
+      audio.removeEventListener('loadeddata', onReady)
+      audio.removeEventListener('canplay', onReady)
+      audio.removeEventListener('canplaythrough', onReady)
+      audio.removeEventListener('error', onError)
+    }
+    const finish = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const onReady = () => {
+      if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) finish()
+    }
+    const onError = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error('音频解码失败'))
+    }
+    audio.addEventListener('loadeddata', onReady)
+    audio.addEventListener('canplay', onReady)
+    audio.addEventListener('canplaythrough', onReady)
+    audio.addEventListener('error', onError)
+    onReady()
+  })
 }
 
 interface ClaimState {
@@ -294,6 +329,7 @@ export function OnlinePage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [boardCount, setBoardCount] = useState(DEFAULT_CANDIDATE_CARDS)
   const [keyword, setKeyword] = useState('')
+  const [roundPreparation, setRoundPreparation] = useState<OnlineRoundPrepare | null>(null)
   const [round, setRound] = useState<OnlineRoundStart | null>(null)
   const [lastResult, setLastResult] = useState<OnlineRoundResult | null>(null)
   const [matchOver, setMatchOver] = useState<Extract<OnlineServerMessage, { t: 'matchOver' }> | null>(null)
@@ -306,6 +342,8 @@ export function OnlinePage() {
   const [arrangeReadyRemaining, setArrangeReadyRemaining] = useState(0)
   const [restReadyRemaining, setRestReadyRemaining] = useState(0)
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('idle')
+  const [audioRetryNonce, setAudioRetryNonce] = useState(0)
+  const [localAudioReady, setLocalAudioReady] = useState(false)
   const [onlineVolume, setOnlineVolumeState] = useState(readOnlineVolume)
   const [connected, setConnected] = useState(socket.connected)
   const [disconnectReason, setDisconnectReason] = useState<OnlineDisconnectReason | null>(null)
@@ -318,7 +356,6 @@ export function OnlinePage() {
   const audioUnlockedRef = useRef(false)
   const audioUnlockingRef = useRef(false)
   const audioGenerationRef = useRef(0)
-  const audioRetryTimerRef = useRef<number | null>(null)
   const battleAnimationIdRef = useRef(0)
   const battleAnimationTimerRef = useRef<number | null>(null)
   const battleAnimationRef = useRef<BattleAnimation | null>(null)
@@ -347,7 +384,10 @@ export function OnlinePage() {
   const ownHandKeys = room?.players[viewerId]?.handCardKeys || EMPTY_CARD_KEYS
   const ownHandSignature = ownHandKeys.join('\u0000')
   const roundRef = useRef<OnlineRoundStart | null>(round)
+  const roundPreparationRef = useRef<OnlineRoundPrepare | null>(roundPreparation)
   const myClaimRef = useRef<ClaimState | null>(myClaim)
+  const localAudioUrlRef = useRef<{ source: string; url: string } | null>(null)
+  const audioReadySentRef = useRef<string | null>(null)
 
   const clearBattleAnimations = useCallback(() => {
     battleAnimationQueueRef.current.length = 0
@@ -406,8 +446,9 @@ export function OnlinePage() {
 
   useEffect(() => {
     roundRef.current = round
+    roundPreparationRef.current = roundPreparation
     myClaimRef.current = myClaim
-  }, [myClaim, round])
+  }, [myClaim, round, roundPreparation])
 
   function playReadyCue() {
     try {
@@ -544,6 +585,7 @@ export function OnlinePage() {
           }
           setLastResult((previous) => (incoming.room.phase === 'playing' ? previous : null))
           if (incoming.room.phase === 'lobby') {
+            setRoundPreparation(null)
             setRound(null)
             setMatchOver(null)
             setClaimsByPlayer({ A: null, B: null })
@@ -571,15 +613,28 @@ export function OnlinePage() {
             }
           })
           break
+        case 'roundPrepare':
+          clearBattleAnimations()
+          audioReadySentRef.current = null
+          setRoundPreparation(incoming)
+          setRound(null)
+          setRoundRemaining(0)
+          setLastResult(null)
+          setMatchOver(null)
+          setMyClaim(null)
+          setOpponentClaim(null)
+          setClaimsByPlayer({ A: null, B: null })
+          break
         case 'roundStart':
           clearBattleAnimations()
+          setRoundPreparation(null)
           setRound(incoming)
           setLastResult(null)
           setMatchOver(null)
           setMyClaim(null)
           setOpponentClaim(null)
           setClaimsByPlayer({ A: null, B: null })
-          setRoundRemaining(incoming.windowMs)
+          setRoundRemaining(0)
           draggingKeyRef.current = null
           dragOverSlotRef.current = null
           setDraggingKey(null)
@@ -626,6 +681,7 @@ export function OnlinePage() {
             showBattleAnimation({ kind: 'discard', winner: incoming.winner, cardKey: incoming.cardKey })
           }
           setLastResult(incoming)
+          setRoundPreparation(null)
           setRound(null)
           setMyClaim(null)
           setOpponentClaim(null)
@@ -633,6 +689,7 @@ export function OnlinePage() {
           break
         case 'matchOver':
           setMatchOver(incoming)
+          setRoundPreparation(null)
           setRound(null)
           setClaimsByPlayer({ A: null, B: null })
           break
@@ -643,6 +700,7 @@ export function OnlinePage() {
             phaseRef.current = null
             roomRef.current = null
             setRoom(null)
+            setRoundPreparation(null)
             setRound(null)
             setLastResult(null)
             setMatchOver(null)
@@ -659,6 +717,7 @@ export function OnlinePage() {
       setConnected(nextConnected)
       setDisconnectReason(nextConnected ? null : reason || 'network')
       if (!nextConnected) {
+        audioReadySentRef.current = null
         // Incremental events may be missed while the socket is down. The next
         // room snapshot/replay is authoritative. Keep the round visible while
         // reconnecting so the player is not left with an empty, non-actionable
@@ -689,15 +748,15 @@ export function OnlinePage() {
     const audio = new Audio()
     audio.preload = 'auto'
     audio.setAttribute('playsinline', 'true')
-    audio.addEventListener('error', () => setAudioStatus('error'))
     audioRef.current = audio
     return () => {
       audio.pause()
       audio.removeAttribute('src')
       audio.load()
       audioRef.current = null
-      if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
-      audioRetryTimerRef.current = null
+      const localAudio = localAudioUrlRef.current
+      if (localAudio) URL.revokeObjectURL(localAudio.url)
+      localAudioUrlRef.current = null
       void audioContextRef.current?.close().catch(() => undefined)
       audioContextRef.current = null
     }
@@ -705,109 +764,134 @@ export function OnlinePage() {
 
   useEffect(() => {
     const audio = audioRef.current
-    const source = round?.audioUrl || room?.restAudioUrl || null
+    const source = round?.audioUrl || roundPreparation?.audioUrl || room?.restAudioUrl || null
+    const preparingRound = Boolean(roundPreparation && !round)
     const generation = audioGenerationRef.current + 1
     audioGenerationRef.current = generation
-    if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
-    audioRetryTimerRef.current = null
     if (!source || !audio) {
       if (audio) audio.pause()
+      setLocalAudioReady(false)
       setAudioStatus(audioUnlockedRef.current ? 'ready' : 'idle')
       return
     }
 
-    audio.preload = 'auto'
-    audio.muted = false
-    audio.volume = onlineVolumeRef.current * (round ? 1 : REST_AUDIO_VOLUME)
-    audio.src = source
-    // Start the media request as soon as the round announcement arrives. The
-    // server announces ROUND_LEAD_MS before startAt, so normal tracks are
-    // buffered before the authoritative countdown reaches zero.
-    audio.load()
     setAudioStatus('loading')
-    const localStart = round ? socket.toLocalTime(round.startAtServerTime) : Date.now()
-    let attempt = 0
-    let readyTimeout: number | null = null
-    let readyResolve: (() => void) | null = null
-    let readyReject: ((error: unknown) => void) | null = null
-    const finishReadyWait = (error?: unknown) => {
-      if (readyTimeout !== null) window.clearTimeout(readyTimeout)
-      readyTimeout = null
-      audio.removeEventListener('canplay', onReady)
-      audio.removeEventListener('error', onReadyError)
-      const resolve = readyResolve
-      const reject = readyReject
-      readyResolve = null
-      readyReject = null
-      if (error) reject?.(error)
-      else resolve?.()
+    setLocalAudioReady(false)
+    audio.pause()
+    let playTimer: number | null = null
+    let cancelled = false
+
+    const ensureLocalAudio = async () => {
+      const cached = localAudioUrlRef.current
+      if (cached?.source === source) return cached.url
+      const blob = await preloadOnlineAudio(source)
+      if (cancelled || generation !== audioGenerationRef.current) return null
+      const url = URL.createObjectURL(blob)
+      const previous = localAudioUrlRef.current
+      localAudioUrlRef.current = { source, url }
+      if (previous && previous.url !== url) URL.revokeObjectURL(previous.url)
+      return url
     }
-    const onReady = () => finishReadyWait()
-    const onReadyError = (error: Event) => finishReadyWait(error)
-    const waitForReady = () => {
-      if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve()
-      return new Promise<void>((resolve, reject) => {
-        readyResolve = resolve
-        readyReject = reject
-        audio.addEventListener('canplay', onReady, { once: true })
-        audio.addEventListener('error', onReadyError, { once: true })
-        // Do not let a slow connection stall the state machine forever. After
-        // the grace period play() is attempted and the browser can continue
-        // buffering while the round is already visible.
-        readyTimeout = window.setTimeout(() => finishReadyWait(), round ? 2_500 : 4_000)
-      })
-    }
-    const retryPlay = async () => {
-      if (generation !== audioGenerationRef.current) return
-      setAudioStatus('loading')
+
+    const playRoundAudio = async () => {
+      if (!round || cancelled || generation !== audioGenerationRef.current) return
+      const localStart = socket.toLocalTime(round.startAtServerTime)
+      const elapsedMs = Math.max(0, Date.now() - localStart)
+      if (elapsedMs > round.windowMs) return
+      audio.currentTime = elapsedMs / 1000
       try {
-        await waitForReady()
-        if (generation !== audioGenerationRef.current) return
-        void audio.play()
-          .then(() => {
-            if (generation === audioGenerationRef.current) {
-              audioUnlockedRef.current = true
-              setAudioStatus('playing')
-            }
-          })
-          .catch((error: unknown) => {
-            if (generation !== audioGenerationRef.current) return
-            if (error instanceof DOMException && error.name === 'NotAllowedError') {
-              setAudioStatus('blocked')
-              return
-            }
-            if (attempt < 3) {
-              attempt += 1
-              audioRetryTimerRef.current = window.setTimeout(() => void retryPlay(), 350 * attempt)
-              return
-            }
-            setAudioStatus('error')
-          })
-      } catch {
-        if (attempt < 3) {
-          attempt += 1
-          audioRetryTimerRef.current = window.setTimeout(() => void retryPlay(), 350 * attempt)
-        } else {
-          setAudioStatus('error')
+        await audio.play()
+        if (generation === audioGenerationRef.current) {
+          audioUnlockedRef.current = true
+          setAudioStatus('playing')
         }
+      } catch (error: unknown) {
+        if (generation !== audioGenerationRef.current) return
+        setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
       }
     }
-    const playTimer = window.setTimeout(() => {
-      retryPlay()
-    }, Math.max(0, localStart - Date.now()))
-    const stopRemainingTimer = scheduleCountdown(
-      () => (round ? localStart + round.windowMs - Date.now() : 0),
-      setRoundRemaining,
-    )
+
+    const prepare = async () => {
+      try {
+        const localUrl = await ensureLocalAudio()
+        if (!localUrl || cancelled || generation !== audioGenerationRef.current) return
+        if (audio.src !== localUrl) audio.src = localUrl
+        audio.preload = 'auto'
+        audio.muted = false
+        audio.volume = onlineVolumeRef.current * (round ? 1 : REST_AUDIO_VOLUME)
+        audio.load()
+        await waitForMediaReady(audio)
+        if (cancelled || generation !== audioGenerationRef.current) return
+        setLocalAudioReady(true)
+
+        if (preparingRound) {
+          setAudioStatus('loaded')
+          const prepared = roundPreparationRef.current
+          const playerId = roomRef.current?.you
+          const readyKey = prepared ? `${prepared.roundNo}:${prepared.audioUrl}` : null
+          if (prepared && playerId && audioReadySentRef.current !== readyKey) {
+            if (socket.send({ t: 'audioReady', roundNo: prepared.roundNo })) audioReadySentRef.current = readyKey
+          }
+          return
+        }
+
+        if (round) {
+          const localStart = socket.toLocalTime(round.startAtServerTime)
+          const delay = Math.max(0, localStart - Date.now())
+          playTimer = window.setTimeout(() => void playRoundAudio(), delay)
+          return
+        }
+
+        try {
+          await audio.play()
+          if (generation === audioGenerationRef.current) {
+            audioUnlockedRef.current = true
+            setAudioStatus('playing')
+          }
+        } catch (error: unknown) {
+          if (generation !== audioGenerationRef.current) return
+          setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
+        }
+      } catch (error: unknown) {
+        if (cancelled || generation !== audioGenerationRef.current) return
+        setLocalAudioReady(false)
+        setAudioStatus('error')
+        setMessage(error instanceof Error ? error.message : '音频预加载失败，请点击重试')
+      }
+    }
+
+    void prepare()
     return () => {
-      window.clearTimeout(playTimer)
-      if (audioRetryTimerRef.current) window.clearTimeout(audioRetryTimerRef.current)
-      audioRetryTimerRef.current = null
-      finishReadyWait(new DOMException('audio source changed', 'AbortError'))
-      stopRemainingTimer()
+      cancelled = true
+      if (playTimer !== null) window.clearTimeout(playTimer)
       audio.pause()
     }
-  }, [room?.restAudioUrl, round, socket])
+  }, [audioRetryNonce, room?.restAudioUrl, round, roundPreparation, socket])
+
+  useEffect(() => {
+    if (!round) {
+      setRoundRemaining(0)
+      return
+    }
+    const localStart = socket.toLocalTime(round.startAtServerTime)
+    let stopCountdown: (() => void) | null = null
+    let startTimer: number | null = null
+    const startCountdown = () => {
+      setRoundRemaining(round.windowMs)
+      stopCountdown = scheduleCountdown(() => localStart + round.windowMs - Date.now(), setRoundRemaining)
+    }
+    const delay = localStart - Date.now()
+    if (delay > 0) {
+      setRoundRemaining(0)
+      startTimer = window.setTimeout(startCountdown, delay)
+    } else {
+      startCountdown()
+    }
+    return () => {
+      if (startTimer !== null) window.clearTimeout(startTimer)
+      stopCountdown?.()
+    }
+  }, [round, socket])
 
   useEffect(() => {
     onlineVolumeRef.current = onlineVolume
@@ -1363,6 +1447,7 @@ export function OnlinePage() {
   const unlockAudio = useCallback(() => {
     if (audioUnlockingRef.current) return
     audioUnlockingRef.current = true
+    if (audioStatus === 'error') setAudioRetryNonce((previous) => previous + 1)
     const audio = audioRef.current
     let context = audioContextRef.current
     try {
@@ -1380,18 +1465,18 @@ export function OnlinePage() {
       return
     }
 
-    const source = audio.getAttribute('src')
-    if (!source) {
-      const previousMuted = audio.muted
+    const isRestAudio = !round && !roundPreparation && Boolean(room?.restAudioUrl)
+    if (!round && !isRestAudio) {
       const silentUrl = createSilentAudioUrl()
-      audio.muted = true
-      audio.src = silentUrl
-      audio.load()
+      const silentAudio = new Audio()
+      silentAudio.preload = 'auto'
+      silentAudio.muted = true
+      silentAudio.src = silentUrl
+      silentAudio.load()
       let playPromise: Promise<void>
       try {
-        playPromise = audio.play()
+        playPromise = silentAudio.play()
       } catch {
-        audio.muted = previousMuted
         URL.revokeObjectURL(silentUrl)
         audioUnlockingRef.current = false
         setAudioStatus('error')
@@ -1399,16 +1484,14 @@ export function OnlinePage() {
       }
       void playPromise
         .then(() => {
-          audio.pause()
-          audio.currentTime = 0
-          audio.removeAttribute('src')
-          audio.load()
           audioUnlockedRef.current = true
-          setAudioStatus('ready')
+          setAudioStatus(localAudioReady ? 'loaded' : 'ready')
         })
         .catch(() => setAudioStatus('blocked'))
-        .finally(() => {
-          audio.muted = previousMuted
+        .then(() => {
+          silentAudio.pause()
+          silentAudio.removeAttribute('src')
+          silentAudio.load()
           URL.revokeObjectURL(silentUrl)
           audioUnlockingRef.current = false
         })
@@ -1416,6 +1499,15 @@ export function OnlinePage() {
     }
 
     audio.muted = false
+    if (round) {
+      const localStart = socket.toLocalTime(round.startAtServerTime)
+      const elapsedMs = Math.max(0, Date.now() - localStart)
+      if (elapsedMs > round.windowMs) {
+        audioUnlockingRef.current = false
+        return
+      }
+      audio.currentTime = elapsedMs / 1000
+    }
     let playPromise: Promise<void>
     try {
       playPromise = audio.play()
@@ -1432,10 +1524,10 @@ export function OnlinePage() {
       .catch((error: unknown) => {
         setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
       })
-      .finally(() => {
+      .then(() => {
         audioUnlockingRef.current = false
       })
-  }, [])
+  }, [audioStatus, localAudioReady, room?.restAudioUrl, round, roundPreparation, socket])
 
   useEffect(() => {
     const handleGesture = () => {
@@ -1449,7 +1541,7 @@ export function OnlinePage() {
     }
   }, [unlockAudio])
 
-  const audioButtonLabel = audioStatus === 'blocked' ? '点击恢复音频' : audioStatus === 'error' ? '重试音频' : audioStatus === 'playing' ? '音频播放中' : audioStatus === 'ready' ? '音频已启用' : '启用音频'
+  const audioButtonLabel = audioStatus === 'blocked' ? '点击恢复音频' : audioStatus === 'error' ? '重试音频' : audioStatus === 'playing' ? '音频播放中' : audioStatus === 'loaded' ? '音频已预加载' : audioStatus === 'ready' ? '音频已启用' : '启用音频'
   const reconnectNow = useCallback(() => {
     setMessage('正在重新连接在线服务…')
     void socket
@@ -1732,13 +1824,14 @@ export function OnlinePage() {
   const matchWinner = matchOver?.winner || room.matchWinner || null
   const matchRounds = matchOver?.rounds || room.roundNo
   const isOpeningArrange = room.phase === 'arrange'
+  const isPreparingRound = Boolean(roundPreparation && !round)
   const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer && !matchIsOver)
   const restSeconds = Math.ceil(restRemaining / 1000)
   const arrangeReadySeconds = Math.ceil(arrangeReadyRemaining / 1000)
   const restReadySeconds = Math.ceil(restReadyRemaining / 1000)
   const readyRemaining = isOpeningArrange ? arrangeReadyRemaining : restReadyRemaining
   const readySeconds = isOpeningArrange ? arrangeReadySeconds : restReadySeconds
-  const stageLabel = matchIsOver ? '本局结束' : isOpeningArrange ? '开局排牌' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
+  const stageLabel = matchIsOver ? '本局结束' : isOpeningArrange ? '开局排牌' : isPreparingRound ? '音频准备中' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
   const isReadyWindow = !matchIsOver && (isOpeningArrange || isResting)
   const restReady = Boolean(me?.restReady)
   const opponentRestReady = Boolean(opponent?.restReady)
@@ -1752,6 +1845,14 @@ export function OnlinePage() {
     ? arrangeReadyRemaining > 0
       ? `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
       : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
+    : isPreparingRound
+      ? room.spectator
+        ? '观战端正在本地完整预加载本回合音频'
+        : me?.audioReady && opponent?.audioReady
+          ? '双方音频已完整加载 · 正在同步开始'
+          : localAudioReady
+            ? '你的音频已完整加载 · 等待对手音频'
+            : '正在把本回合音频完整下载到本地'
     : isResting
       ? restReadyRemaining > 0
         ? `双方已准备 · ${restReadySeconds} 秒后开始下一回合`
@@ -1807,7 +1908,7 @@ export function OnlinePage() {
               {connected ? '连接稳定' : '正在重连…'}
             </span>
             {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
-            <span className="chip">{matchIsOver ? '本局结束' : round ? `第 ${round.roundNo} 回合` : isResting ? '休息阶段' : '等待下一回合'}</span>
+            <span className="chip">{matchIsOver ? '本局结束' : round ? `第 ${round.roundNo} 回合` : isPreparingRound ? '音频准备中' : isResting ? '休息阶段' : '等待下一回合'}</span>
             <div className="online-style-switch" role="group" aria-label="对战视图">
               <span className="online-style-caption">视图</span>
               <button
@@ -1889,6 +1990,8 @@ export function OnlinePage() {
                   ? '—'
                   : isOpeningArrange
                   ? `${arrangeReadyRemaining > 0 ? arrangeReadySeconds : Math.ceil(arrangeRemaining / 1000)} 秒`
+                  : isPreparingRound
+                    ? '准备中'
                   : isResting
                     ? `${restReadyRemaining > 0 ? restReadySeconds : restSeconds} 秒`
                     : round
@@ -1947,6 +2050,7 @@ export function OnlinePage() {
               {audioStatus === 'blocked' ? <span className="online-audio-status error" role="alert">浏览器拦截了自动播放，请点击按钮恢复音频。</span> : null}
               {audioStatus === 'error' ? <span className="online-audio-status error" role="alert">音频资源加载失败，请点击重试。</span> : null}
               {audioStatus === 'loading' ? <span className="online-audio-status">音频加载中…</span> : null}
+              {audioStatus === 'loaded' ? <span className="online-audio-status">音频已完整加载到本地，等待双方就绪。</span> : null}
             </div>
           </aside>
         </div>

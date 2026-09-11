@@ -21,10 +21,10 @@ const REST_WINDOW_MS = 40_000
 const WRONG_TRANSFER_TIMEOUT_MS = REST_WINDOW_MS
 const REST_AUDIO_GRACE_MS = 10_000
 const ROUND_WINDOW_MS = 10_000
-// Give clients enough time to start the media request before the authoritative
-// round timestamp. The server still evaluates claims against startAt, so this
-// does not change the fair claim window.
-const ROUND_LEAD_MS = 2_000
+// The round is announced separately from its authoritative start. Clients must
+// download the complete audio response into local storage and acknowledge it
+// before this small lead is used to fan out the synchronized start timestamp.
+const ROUND_SYNC_LEAD_MS = 2_000
 const ROOM_TTL_MS = 30 * 60 * 1000
 const RESUME_TTL_MS = 90 * 1000
 const MAX_SPECTATORS = 32
@@ -194,6 +194,9 @@ export class OnlineRoomManager {
           break
         case 'claim':
           this.currentRoom(session)?.claim(session, message)
+          break
+        case 'audioReady':
+          this.currentRoom(session)?.audioReady(session, message)
           break
         case 'leaveRoom':
           this.leave(session)
@@ -965,7 +968,6 @@ class OnlineRoom {
     const choice = choices[Math.floor(Math.random() * choices.length)]
     if (choice.isEmpty) this.emptyRemainingSongs.splice(choice.index, 1)
     const token = crypto.randomBytes(20).toString('base64url')
-    const startAt = Date.now() + ROUND_LEAD_MS
     this.roundNo += 1
     this.current = {
       roundNo: this.roundNo,
@@ -973,8 +975,9 @@ class OnlineRoom {
       isEmpty: choice.isEmpty,
       song: choice.song,
       token,
-      startAt,
-      endsAt: startAt + ROUND_WINDOW_MS,
+      startAt: null,
+      endsAt: null,
+      audioReady: new Set(),
       claims: new Map(),
       lastClaim: null,
       resultMessage: null,
@@ -986,9 +989,11 @@ class OnlineRoom {
       restSong: null,
       restAudioUrl: null,
       restExpiresAt: null,
-      expiresAt: startAt + ROUND_WINDOW_MS + REST_WINDOW_MS + 10_000,
+      // Keep the single-use URL valid while both clients download the complete
+      // response. It is shortened as soon as the authoritative start is set.
+      expiresAt: Date.now() + ROOM_TTL_MS,
     }
-    logOnlineEvent('round.started', {
+    logOnlineEvent('round.prepared', {
       room: this.code,
       roundNo: this.roundNo,
       isEmpty: choice.isEmpty,
@@ -997,23 +1002,66 @@ class OnlineRoom {
     })
     this.touch()
     this.broadcast({
-      t: 'roundStart',
+      t: 'roundPrepare',
       roundNo: this.roundNo,
+      audioUrl: `/api/online/room/${this.code}/audio/${token}`,
+    })
+    this.sendRoom()
+  }
+
+  audioReady(session, message) {
+    const playerId = this.playerIdFor(session)
+    const current = this.current
+    if (!playerId || this.phase !== 'playing' || !current || current.resolved) return
+    if (message.roundNo !== current.roundNo || current.startAt !== null) return
+    if (!current.audioReady.has(playerId)) {
+      current.audioReady.add(playerId)
+      this.touch()
+      this.sendRoom()
+    }
+    if (
+      current.audioReady.has('A') &&
+      current.audioReady.has('B') &&
+      this.seats.A?.socket &&
+      this.seats.B?.socket
+    ) {
+      this.startRound(current)
+    }
+  }
+
+  startRound(current) {
+    if (this.disposed || this.phase !== 'playing' || this.current !== current || current.resolved || current.startAt !== null) return
+    if (!current.audioReady.has('A') || !current.audioReady.has('B') || !this.seats.A?.socket || !this.seats.B?.socket) return
+    const startAt = Date.now() + ROUND_SYNC_LEAD_MS
+    current.startAt = startAt
+    current.endsAt = startAt + ROUND_WINDOW_MS
+    current.expiresAt = current.endsAt + REST_WINDOW_MS + REST_AUDIO_GRACE_MS
+    logOnlineEvent('round.started', {
+      room: this.code,
+      roundNo: current.roundNo,
+      isEmpty: current.isEmpty,
+      cardKey: current.cardKey || undefined,
+      song: current.song.displayName,
+    })
+    this.touch()
+    this.broadcast({
+      t: 'roundStart',
+      roundNo: current.roundNo,
       startAtServerTime: startAt,
       windowMs: ROUND_WINDOW_MS,
-      audioUrl: `/api/online/room/${this.code}/audio/${token}`,
+      audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
     })
     this.sendRoom()
     this.roundTimer = setTimeout(
       () => this.resolveRound(null, 'timeout'),
-      ROUND_LEAD_MS + ROUND_WINDOW_MS + CLAIM_COMPENSATION_CAP_MS,
+      Math.max(0, current.endsAt - Date.now() + CLAIM_COMPENSATION_CAP_MS),
     )
   }
 
   claim(session, message) {
     const playerId = this.playerIdFor(session)
     const current = this.current
-    if (!playerId || this.phase !== 'playing' || !current || current.resolved) return
+    if (!playerId || this.phase !== 'playing' || !current || current.resolved || current.startAt === null || current.endsAt === null) return
     if (message.roundNo !== current.roundNo || current.claims.has(playerId) || this.pendingTransfer) return
     const cardKey = typeof message.cardKey === 'string' ? message.cardKey : ''
     if (cardKey && (!this.cardByKey.has(cardKey) || !this.isCardOnBoard(cardKey))) return
@@ -1304,6 +1352,7 @@ class OnlineRoom {
   disconnect(playerId) {
     const seat = this.seats[playerId]
     if (!seat || !seat.socket) return
+    let audioReadyChanged = false
     seat.socket = null
     seat.disconnectedAt = Date.now()
     logOnlineEvent('player.disconnected', {
@@ -1322,12 +1371,14 @@ class OnlineRoom {
     }
     if (this.phase === 'playing') {
       seat.restReady = false
+      if (this.current && this.current.startAt === null) audioReadyChanged = this.current.audioReady.delete(playerId)
       if (this.restReadyStartAt && this.current?.restEndsAtServerTime) {
         this.restReadyStartAt = null
         this.scheduleNextRound(Math.max(0, this.current.restEndsAtServerTime - Date.now()))
       }
     }
     this.touch()
+    if (audioReadyChanged) this.sendRoom()
     this.broadcastPeer(playerId, false)
     this.networkChanged()
   }
@@ -1462,7 +1513,16 @@ class OnlineRoom {
       this.manager.send(session, current.resultMessage)
       return
     }
-    if (current.resolved || this.pendingTransfer || Date.now() >= current.endsAt) return
+    if (current.resolved || this.pendingTransfer) return
+    if (current.startAt === null || current.endsAt === null) {
+      this.manager.send(session, {
+        t: 'roundPrepare',
+        roundNo: current.roundNo,
+        audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
+      })
+      return
+    }
+    if (Date.now() >= current.endsAt) return
     this.manager.send(session, {
       t: 'roundStart',
       roundNo: current.roundNo,
@@ -1568,6 +1628,7 @@ class OnlineRoom {
       id: playerId,
       nickname: seat.nickname,
       connected: Boolean(seat.socket),
+      audioReady: Boolean(this.current && !this.current.resolved && this.current.audioReady?.has(playerId)),
       ready: seat.ready,
       arrangeReady: seat.arrangeReady,
       restReady: seat.restReady,
