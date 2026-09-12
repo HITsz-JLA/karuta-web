@@ -6,7 +6,10 @@ const pendingAudioLoads = new Map<string, Promise<Blob>>()
 function openAudioCache() {
   if (typeof caches === 'undefined') return Promise.resolve(null)
   if (!audioCachePromise) {
-    audioCachePromise = caches.open(ONLINE_AUDIO_CACHE_NAME).catch(() => null)
+    audioCachePromise = caches.open(ONLINE_AUDIO_CACHE_NAME).catch(() => {
+      audioCachePromise = null
+      return null
+    })
   }
   return audioCachePromise
 }
@@ -31,12 +34,14 @@ function fullResponse(response: Response, blob: Blob) {
 
 async function fetchAudioBlob(source: string): Promise<Blob> {
   const cache = await openAudioCache()
-  const cached = await cache?.match(source)
+  if (!cache) throw new Error('浏览器无法使用本地音频缓存，无法安全开始对局')
+
+  const cached = await cache.match(source)
   if (cached) {
     try {
       return fullResponse(cached, await cached.blob())
     } catch {
-      await cache?.delete(source).catch(() => false)
+      await cache.delete(source).catch(() => false)
     }
   }
 
@@ -50,7 +55,7 @@ async function fetchAudioBlob(source: string): Promise<Blob> {
   if (!response.ok) throw new Error(`音频加载失败（HTTP ${response.status}）`)
   const responseForCache = response.clone()
   const blob = fullResponse(response, await response.blob())
-  await cache?.put(source, responseForCache).catch(() => undefined)
+  await cache.put(source, responseForCache)
   return blob
 }
 
@@ -59,6 +64,32 @@ async function fetchAudioBlob(source: string): Promise<Blob> {
  * browser's Cache Storage. The in-flight map prevents two media consumers in
  * the same page from issuing duplicate downloads.
  */
+export async function preloadOnlineAudioMany(
+  sources: string[],
+  options: { concurrency?: number; onProgress?: (done: number, total: number) => void } = {},
+) {
+  const unique = [...new Set(sources.filter(Boolean))]
+  const total = unique.length
+  if (!total) {
+    options.onProgress?.(0, 0)
+    return
+  }
+  let done = 0
+  const queue = [...unique]
+  const workerCount = Math.max(1, Math.min(options.concurrency || 4, queue.length))
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (queue.length) {
+        const source = queue.shift()
+        if (!source) break
+        await preloadOnlineAudio(source)
+        done += 1
+        options.onProgress?.(done, total)
+      }
+    }),
+  )
+}
+
 export function preloadOnlineAudio(source: string): Promise<Blob> {
   const pending = pendingAudioLoads.get(source)
   if (pending) return pending

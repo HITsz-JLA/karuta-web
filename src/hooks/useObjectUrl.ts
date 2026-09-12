@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { getBlob, getBlobUrl } from '../lib/storage'
-import { createThumbnailObjectUrl, enqueueImageLoad } from '../lib/imagePreview'
+import { getBlob, getBlobUrl, putBlob } from '../lib/storage'
+import { createThumbnailBlob, enqueueImageLoad, thumbnailBlobKey } from '../lib/imagePreview'
 
 interface CachedObjectUrl {
   url: string
@@ -26,6 +26,14 @@ function trimIdleObjectUrls() {
   }
 }
 
+async function persistThumbnail(imageBlobKey: string, source: Blob): Promise<Blob> {
+  const thumb = await createThumbnailBlob(source, { idle: true })
+  if (thumb !== source) {
+    await putBlob(thumbnailBlobKey(imageBlobKey), thumb, thumb.type || 'image/webp').catch(() => undefined)
+  }
+  return thumb
+}
+
 async function acquireObjectUrl(blobKey: string, thumbnail: boolean): Promise<string | null> {
   const cacheKey = thumbnail ? `thumbnail:${blobKey}` : blobKey
   const cached = objectUrlCache.get(cacheKey)
@@ -39,8 +47,12 @@ async function acquireObjectUrl(blobKey: string, thumbnail: boolean): Promise<st
   if (!pending) {
     pending = enqueueImageLoad(async () => {
       if (!thumbnail) return getBlobUrl(blobKey)
-      const blob = await getBlob(blobKey)
-      return blob ? createThumbnailObjectUrl(blob) : null
+      const storedThumb = await getBlob(thumbnailBlobKey(blobKey))
+      if (storedThumb) return URL.createObjectURL(storedThumb)
+      const source = await getBlob(blobKey)
+      if (!source) return null
+      const thumb = await persistThumbnail(blobKey, source)
+      return URL.createObjectURL(thumb)
     }).finally(() => {
       pendingObjectUrls.delete(cacheKey)
     })

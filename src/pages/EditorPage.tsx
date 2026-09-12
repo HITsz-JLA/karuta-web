@@ -19,6 +19,13 @@ function blankCard(number: number): CardEntry {
   }
 }
 
+function readableEditorError(error: unknown, fallback: string) {
+  if (error instanceof Error && /connection is closing|transactioninactiveerror|invalidstateerror/i.test(error.message)) {
+    return '浏览器本地数据连接已关闭，请关闭本页面的其他标签后按 Ctrl+F5 重试；若仍失败，请清理本站点的 IndexedDB 后重新导入'
+  }
+  return error instanceof Error ? error.message : fallback
+}
+
 export function EditorPage() {
   const { deckId } = useParams()
   const navigate = useNavigate()
@@ -57,7 +64,7 @@ export function EditorPage() {
   const sortedCards = useMemo(() => deck?.cards || [], [deck])
 
   async function saveCurrent() {
-    if (!deck || !draft) return
+    if (!deck || !draft || busy) return
     if (!draft.workName.trim()) {
       setStatus('请填写作品名')
       return
@@ -77,50 +84,80 @@ export function EditorPage() {
 
     // Keep explicit numbers when possible, then renumber gaps by sort
     nextCards.sort((a, b) => a.number - b.number)
-    await persist({ ...deck, cards: nextCards })
-    setDraft(normalized)
-    setEditingId(normalized.id)
-    setStatus('已保存')
-    await refreshList()
+    setBusy(true)
+    try {
+      await persist({ ...deck, cards: nextCards })
+      setDraft(normalized)
+      setEditingId(normalized.id)
+      setStatus('已保存')
+      await refreshList()
+    } catch (error) {
+      setStatus(readableEditorError(error, '保存作品失败'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function deleteCurrent() {
-    if (!deck || !draft) return
+    if (!deck || !draft || busy) return
     if (!window.confirm(`删除「${draft.workName || '未命名'}」？`)) return
     const nextCards = deck.cards.filter((card) => card.id !== draft.id)
-    await persist({ ...deck, cards: nextCards })
-    setEditingId(null)
-    setDraft(null)
-    setStatus('已删除作品')
-    await refreshList()
+    setBusy(true)
+    try {
+      await persist({ ...deck, cards: nextCards })
+      setEditingId(null)
+      setDraft(null)
+      setStatus('已删除作品')
+      await refreshList()
+    } catch (error) {
+      setStatus(readableEditorError(error, '删除作品失败'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function onPickImage(file: File) {
-    if (!draft) return
-    const key = createId('img')
-    await putBlob(key, file, file.type)
-    setDraft({
-      ...draft,
-      imageBlobKey: key,
-      imageName: file.name,
-    })
+    if (!draft || busy) return
+    setBusy(true)
+    try {
+      const key = createId('img')
+      await putBlob(key, file, file.type)
+      setDraft({
+        ...draft,
+        imageBlobKey: key,
+        imageName: file.name,
+      })
+      setStatus('图片已添加，保存作品后生效')
+    } catch (error) {
+      setStatus(readableEditorError(error, '图片添加失败'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function onPickAudio(files: FileList) {
-    if (!draft) return
-    const songs: SongEntry[] = [...draft.songs]
-    for (const file of Array.from(files)) {
-      const key = createId('audio')
-      await putBlob(key, file, file.type)
-      songs.push({
-        id: createId('song'),
-        fileName: file.name,
-        displayName: file.name.replace(/\.[^.]+$/, ''),
-        blobKey: key,
-        fullBlobKey: key,
-      })
+    if (!draft || busy) return
+    setBusy(true)
+    try {
+      const songs: SongEntry[] = [...draft.songs]
+      for (const file of Array.from(files)) {
+        const key = createId('audio')
+        await putBlob(key, file, file.type)
+        songs.push({
+          id: createId('song'),
+          fileName: file.name,
+          displayName: file.name.replace(/\.[^.]+$/, ''),
+          blobKey: key,
+          fullBlobKey: key,
+        })
+      }
+      setDraft({ ...draft, songs })
+      setStatus(`${files.length} 首歌曲已添加，保存作品后生效`)
+    } catch (error) {
+      setStatus(readableEditorError(error, '歌曲添加失败'))
+    } finally {
+      setBusy(false)
     }
-    setDraft({ ...draft, songs })
   }
 
   async function exportZip(mode: PackageMode) {
@@ -161,19 +198,34 @@ export function EditorPage() {
   }
 
   async function renameDeck() {
-    if (!deck) return
+    if (!deck || busy) return
     const name = window.prompt('数据集名称', deck.name)
     if (!name?.trim()) return
-    await persist({ ...deck, name: name.trim() })
-    await refreshList()
+    setBusy(true)
+    try {
+      await persist({ ...deck, name: name.trim() })
+      await refreshList()
+      setStatus('数据集已重命名')
+    } catch (error) {
+      setStatus(readableEditorError(error, '重命名失败'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function removeDeck() {
-    if (!deck) return
+    if (!deck || busy) return
     if (!window.confirm(`删除数据集「${deck.name}」及其本地资源？`)) return
-    await remove(true)
-    await refreshList()
-    navigate('/editor')
+    setBusy(true)
+    try {
+      await remove(true)
+      await refreshList()
+      navigate('/editor')
+    } catch (error) {
+      setStatus(readableEditorError(error, '删除数据集失败'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   if (loading) return <div className="empty-state">加载中…</div>
@@ -200,7 +252,7 @@ export function EditorPage() {
       </section>
 
       <div className="row" style={{ marginBottom: 16 }}>
-        <button className="btn btn-secondary" type="button" onClick={() => void renameDeck()}>
+        <button className="btn btn-secondary" type="button" onClick={() => void renameDeck()} disabled={busy}>
           重命名
         </button>
         <button className="btn btn-secondary" type="button" onClick={() => void exportCsv()} disabled={busy}>
@@ -218,7 +270,7 @@ export function EditorPage() {
         <button className="btn btn-secondary" type="button" onClick={() => void exportPdf('ALBUM')} disabled={busy}>
           专辑打印 PDF
         </button>
-        <button className="btn btn-danger" type="button" onClick={() => void removeDeck()}>
+        <button className="btn btn-danger" type="button" onClick={() => void removeDeck()} disabled={busy}>
           删除数据集
         </button>
       </div>
@@ -230,6 +282,7 @@ export function EditorPage() {
             <button
               className="btn btn-primary"
               type="button"
+              disabled={busy}
               onClick={() => {
                 const nextNumber =
                   deck.cards.reduce((max, card) => Math.max(max, card.number), 0) + 1
@@ -294,10 +347,10 @@ export function EditorPage() {
               </div>
 
               <div className="row">
-                <button className="btn btn-secondary" type="button" onClick={() => imageRef.current?.click()}>
+                <button className="btn btn-secondary" type="button" onClick={() => imageRef.current?.click()} disabled={busy}>
                   选择图片
                 </button>
-                <button className="btn btn-secondary" type="button" onClick={() => audioRef.current?.click()}>
+                <button className="btn btn-secondary" type="button" onClick={() => audioRef.current?.click()} disabled={busy}>
                   添加歌曲
                 </button>
               </div>
@@ -357,15 +410,16 @@ export function EditorPage() {
               </div>
 
               <div className="row">
-                <button className="btn btn-primary" type="button" onClick={() => void saveCurrent()}>
+                <button className="btn btn-primary" type="button" onClick={() => void saveCurrent()} disabled={busy}>
                   保存作品
                 </button>
-                <button className="btn btn-danger" type="button" onClick={() => void deleteCurrent()}>
+                <button className="btn btn-danger" type="button" onClick={() => void deleteCurrent()} disabled={busy}>
                   删除作品
                 </button>
                 <button
                   className="btn btn-secondary"
                   type="button"
+                  disabled={busy}
                   onClick={() => {
                     setDraft(null)
                     setEditingId(null)

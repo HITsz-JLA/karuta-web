@@ -33,9 +33,24 @@ export function enqueueImageLoad<T>(task: () => Promise<T>): Promise<T> {
   })
 }
 
-/** Creates a small WebP preview while keeping the source image untouched. */
-export async function createThumbnailObjectUrl(blob: Blob): Promise<string> {
-  if (typeof createImageBitmap !== 'function') return URL.createObjectURL(blob)
+export function thumbnailBlobKey(imageBlobKey: string) {
+  return `thumb:${imageBlobKey}`
+}
+
+function waitForIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => resolve(), { timeout: 200 })
+      return
+    }
+    setTimeout(resolve, 0)
+  })
+}
+
+/** Creates a small WebP preview blob while keeping the source image untouched. */
+export async function createThumbnailBlob(blob: Blob, options: { idle?: boolean } = {}): Promise<Blob> {
+  if (options.idle) await waitForIdle()
+  if (typeof createImageBitmap !== 'function') return blob
 
   let bitmap: ImageBitmap | null = null
   try {
@@ -43,7 +58,7 @@ export async function createThumbnailObjectUrl(blob: Blob): Promise<string> {
     const scale = Math.min(1, THUMBNAIL_MAX_WIDTH / bitmap.width, THUMBNAIL_MAX_HEIGHT / bitmap.height)
     const width = Math.max(1, Math.round(bitmap.width * scale))
     const height = Math.max(1, Math.round(bitmap.height * scale))
-    if (scale === 1 && blob.type === 'image/webp') return URL.createObjectURL(blob)
+    if (scale === 1 && blob.type === 'image/webp') return blob
 
     const canvas =
       typeof OffscreenCanvas !== 'undefined'
@@ -51,10 +66,10 @@ export async function createThumbnailObjectUrl(blob: Blob): Promise<string> {
         : typeof document !== 'undefined'
           ? Object.assign(document.createElement('canvas'), { width, height })
           : null
-    if (!canvas) return URL.createObjectURL(blob)
+    if (!canvas) return blob
 
     const context = canvas.getContext('2d')
-    if (!context) return URL.createObjectURL(blob)
+    if (!context) return blob
     context.imageSmoothingEnabled = true
     context.imageSmoothingQuality = 'medium'
     context.drawImage(bitmap, 0, 0, width, height)
@@ -65,11 +80,15 @@ export async function createThumbnailObjectUrl(blob: Blob): Promise<string> {
         : await new Promise<Blob | null>((resolve) => {
             ;(canvas as HTMLCanvasElement).toBlob(resolve, 'image/webp', THUMBNAIL_QUALITY)
           })
-    return thumbnail ? URL.createObjectURL(thumbnail) : URL.createObjectURL(blob)
+    return thumbnail || blob
   } catch {
-    // Keep old browsers and unusual image formats usable.
-    return URL.createObjectURL(blob)
+    return blob
   } finally {
     bitmap?.close()
   }
+}
+
+/** Creates a small WebP preview while keeping the source image untouched. */
+export async function createThumbnailObjectUrl(blob: Blob): Promise<string> {
+  return URL.createObjectURL(await createThumbnailBlob(blob))
 }

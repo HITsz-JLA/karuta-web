@@ -96,6 +96,7 @@ async function readyRoundAudio(manager, host, guest, hostSocket) {
   await manager.handle(guest, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
   const round = latest(hostSocket, 'roundStart')
   assert.ok(round)
+  assert.ok(round.startAtServerTime - Date.now() >= 1_800)
   await new Promise((resolve) => setTimeout(resolve, Math.max(0, round.startAtServerTime - Date.now()) + 25))
   return round
 }
@@ -203,8 +204,176 @@ test('a round waits for both complete local audio acknowledgements before timing
     assert.equal(room.current.endsAt - room.current.startAt, 10_000)
     assert.ok(room.roundTimer)
     assert.equal(latest(hostSocket, 'roundStart').roundNo, prepare.roundNo)
+    assert.equal(prepare.playId, prepare.roundNo)
+    assert.equal(latest(hostSocket, 'roundStart').playId, prepare.roundNo)
     assert.equal(latest(hostSocket, 'room').room.players.A.audioReady, true)
     assert.equal(latest(hostSocket, 'room').room.players.B.audioReady, true)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('arrange broadcasts match audio and start waits until both clients finish loading', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-match-audio-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    const matchAudio = latest(hostSocket, 'matchAudio')
+    assert.ok(matchAudio)
+    assert.ok(matchAudio.total > 0)
+    assert.equal(matchAudio.tracks.length, matchAudio.total)
+    assert.ok(matchAudio.tracks.every((track) => typeof track.audioUrl === 'string' && track.audioUrl.includes('/audio/')))
+    assert.equal(latest(hostSocket, 'room').room.matchAudioTotal, matchAudio.total)
+    const expectedMatchAudioIds = new Set([
+      ...[...room.remaining].flatMap((key) => room.cardByKey.get(key)?.songs || []),
+      ...room.emptySongs,
+      ...room.restSongs,
+    ].map((song) => JSON.stringify(song)))
+    assert.equal(matchAudio.total, expectedMatchAudioIds.size)
+
+    room.requestStartPlaying()
+    assert.equal(room.phase, 'arrange')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, true)
+
+    await manager.handle(host, JSON.stringify({ t: 'matchAudioReady' }))
+    assert.equal(room.phase, 'arrange')
+    assert.equal(latest(hostSocket, 'room').room.players.A.matchAudioReady, true)
+
+    await manager.handle(guest, JSON.stringify({ t: 'matchAudioReady' }))
+    assert.equal(room.phase, 'playing')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, false)
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+    const prepare = latest(hostSocket, 'roundPrepare')
+    assert.ok(prepare)
+    assert.equal(matchAudio.tracks.some((track) => track.audioUrl === prepare.audioUrl), true)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('match audio wait never starts before both seats are ready', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-match-audio-timeout-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+
+    room.requestStartPlaying()
+    assert.equal(room.phase, 'arrange')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, true)
+    assert.equal(room.matchAudioWaitTimer, null)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.equal(room.phase, 'arrange')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, true)
+
+    await manager.handle(host, JSON.stringify({ t: 'matchAudioReady' }))
+    assert.equal(room.phase, 'arrange')
+    await manager.handle(guest, JSON.stringify({ t: 'matchAudioReady' }))
+    assert.equal(room.phase, 'playing')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, false)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('start proceeds immediately when both seats already cached match audio', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-match-audio-ready-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+
+    await manager.handle(host, JSON.stringify({ t: 'matchAudioReady' }))
+    await manager.handle(guest, JSON.stringify({ t: 'matchAudioReady' }))
+    room.requestStartPlaying()
+    assert.equal(room.phase, 'playing')
+    assert.equal(latest(hostSocket, 'room').room.waitingMatchAudio, false)
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('disconnect during audio handshake drops that seat ready flag until it acks again', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-audio-resume-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+    primeNetwork(manager, [host, guest])
+    await manager.handle(host, JSON.stringify({ t: 'ready', ready: true }))
+    await manager.handle(guest, JSON.stringify({ t: 'ready', ready: true }))
+    const room = await prepareMatch(manager, host, guest, hostSocket, guestSocket)
+    room.startPlaying()
+    clearTimeout(room.nextRoundTimer)
+    room.nextRoundTimer = null
+    room.nextRound()
+
+    const prepare = latest(hostSocket, 'roundPrepare')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    await manager.handle(host, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+    assert.deepEqual([...room.current.audioReady], ['A'])
+    assert.equal(latest(hostSocket, 'roundStart'), undefined)
+
+    manager.disconnect(host)
+    assert.deepEqual([...room.current.audioReady], [])
+    assert.equal(room.current.startAt, null)
+
+    await manager.handle(guest, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+    assert.deepEqual([...room.current.audioReady], ['B'])
+    assert.equal(latest(guestSocket, 'roundStart'), undefined)
+
+    const resumedSocket = new FakeSocket()
+    const resumed = manager.connect(resumedSocket)
+    await manager.handle(resumed, JSON.stringify({ t: 'hello', resumeToken }))
+    assert.equal(latest(resumedSocket, 'roundPrepare').roundNo, prepare.roundNo)
+    assert.equal(latest(resumedSocket, 'roundStart'), undefined)
+
+    await manager.handle(resumed, JSON.stringify({ t: 'audioReady', roundNo: prepare.roundNo }))
+    assert.equal(latest(resumedSocket, 'roundStart').roundNo, prepare.roundNo)
+    assert.ok(room.current.startAt > Date.now())
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -840,6 +1009,15 @@ test('empty-song rounds use 20 outside songs once and treat every card click as 
     assert.equal(room.seats.B.handCardKeys.length, guestHandBefore - 1)
     assert.ok(room.current.restSong)
     assert.ok(latest(hostSocket, 'room').room.restAudioUrl)
+    const matchAudio = latest(hostSocket, 'matchAudio')
+    const restAudioUrl = latest(hostSocket, 'room').room.restAudioUrl
+    assert.equal(matchAudio.tracks.some((track) => track.audioUrl === restAudioUrl), true)
+    const expectedMatchAudioIds = new Set([
+      ...[...room.remaining].flatMap((key) => room.cardByKey.get(key)?.songs || []),
+      ...room.emptySongs,
+      ...room.restSongs,
+    ].map((song) => JSON.stringify(song)))
+    assert.equal(matchAudio.total, expectedMatchAudioIds.size)
     const fieldSongIds = new Set(room.cards.flatMap((card) => card.songs).map((song) => JSON.stringify(song)))
     const emptySongIds = new Set(room.emptySongs.map((song) => JSON.stringify(song)))
     assert.equal(fieldSongIds.has(JSON.stringify(room.current.restSong)), false)

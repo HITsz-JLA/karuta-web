@@ -1,9 +1,9 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type DragEvent, type MouseEvent, type PointerEvent, type SetStateAction, type UIEvent } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { OnlineCardTile } from '../components/OnlineCardTile'
+import { OnlineHall } from './online/OnlineHall'
+import { OnlineDraftBan, OnlineDraftSelect, OnlineRoomLobby } from './online/OnlineRoomPhases'
 import {
   type OnlineCardView,
-  type OnlineNetworkView,
   type OnlinePlayerId,
   type OnlineRoomSummary,
   type OnlineRoundResult,
@@ -13,289 +13,60 @@ import {
   type OnlineServerMessage,
 } from '../lib/onlineProtocol'
 import { OnlineSocket, type OnlineDisconnectReason } from '../lib/onlineSocket'
-import { preloadOnlineAudio } from '../lib/onlineAudio'
+import { preloadOnlineAudio, preloadOnlineAudioMany } from '../lib/onlineAudio'
+import './online/online.css'
 import {
   CURATED_SERVER_PACKAGES,
   getServerPackageCatalog,
   listServerPackages,
-  serverCardImageUrl,
   type ServerPackage,
   type ServerPackageCatalog,
-  type ServerPackageCatalogCard,
 } from '../lib/serverPackages'
-
-const MIN_CANDIDATE_CARDS = 60
-const MAX_CANDIDATE_CARDS = 500
-const DEFAULT_CANDIDATE_CARDS = 60
-const DRAFT_SELECTION_SIZE = 30
-const BAN_SIZE = 5
-const MAX_HAND_SLOTS = 33
-const REST_AUDIO_VOLUME = 0.28
-const ONLINE_VOLUME_STORAGE_KEY = 'karuta-online-volume'
-const DEFAULT_ONLINE_VOLUME = 0.8
-const EMPTY_CARD_KEYS: string[] = []
-const COUNTDOWN_EARLY_WAKE_MS = 24
-
-type AudioStatus = 'idle' | 'ready' | 'loaded' | 'loading' | 'playing' | 'blocked' | 'error'
-type BattleStyle = 'text' | 'card'
-
-const BATTLE_STYLE_STORAGE_KEY = 'karuta-online-battle-style'
-
-function setCountdownRemaining(setter: Dispatch<SetStateAction<number>>, nextValue: number) {
-  const next = Math.max(0, nextValue)
-  setter((previous) => {
-    if ((previous > 0) === (next > 0) && Math.ceil(previous / 1000) === Math.ceil(next / 1000)) return previous
-    return next
-  })
-}
-
-/**
- * Countdown text only changes at one-second boundaries. A 250ms interval was
- * waking every active match several times more often than the UI can display.
- * Schedule the next wake close to the next boundary and keep the small early
- * margin so background timer rounding cannot leave a stale second visible.
- */
-function scheduleCountdown(getRemaining: () => number, setter: Dispatch<SetStateAction<number>>) {
-  let timer: number | null = null
-  const update = () => {
-    const remaining = Math.max(0, getRemaining())
-    setCountdownRemaining(setter, remaining)
-    if (remaining <= 0) {
-      timer = null
-      return
-    }
-    const untilBoundary = remaining % 1000 || 1000
-    timer = window.setTimeout(update, Math.min(1000, untilBoundary + COUNTDOWN_EARLY_WAKE_MS))
-  }
-  update()
-  return () => {
-    if (timer !== null) window.clearTimeout(timer)
-    timer = null
-  }
-}
-
-function readBattleStyle(): BattleStyle {
-  try {
-    return localStorage.getItem(BATTLE_STYLE_STORAGE_KEY) === 'text' ? 'text' : 'card'
-  } catch {
-    return 'card'
-  }
-}
-
-function clampOnlineVolume(value: number) {
-  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : DEFAULT_ONLINE_VOLUME))
-}
-
-function readOnlineVolume() {
-  try {
-    const raw = localStorage.getItem(ONLINE_VOLUME_STORAGE_KEY)
-    if (raw === null) return DEFAULT_ONLINE_VOLUME
-    const stored = Number(raw)
-    return Number.isFinite(stored) ? clampOnlineVolume(stored) : DEFAULT_ONLINE_VOLUME
-  } catch {
-    return DEFAULT_ONLINE_VOLUME
-  }
-}
-
-function createSilentAudioUrl() {
-  const sampleRate = 8_000
-  const sampleCount = 80
-  const buffer = new ArrayBuffer(44 + sampleCount)
-  const view = new DataView(buffer)
-  const writeText = (offset: number, value: string) => {
-    for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index))
-  }
-  writeText(0, 'RIFF')
-  view.setUint32(4, 36 + sampleCount, true)
-  writeText(8, 'WAVE')
-  writeText(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate, true)
-  view.setUint16(32, 1, true)
-  view.setUint16(34, 8, true)
-  writeText(36, 'data')
-  view.setUint32(40, sampleCount, true)
-  new Uint8Array(buffer, 44).fill(128)
-  return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }))
-}
-
-function waitForMediaReady(audio: HTMLAudioElement): Promise<void> {
-  if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return Promise.resolve()
-  return new Promise<void>((resolve, reject) => {
-    let settled = false
-    const cleanup = () => {
-      audio.removeEventListener('loadeddata', onReady)
-      audio.removeEventListener('canplay', onReady)
-      audio.removeEventListener('canplaythrough', onReady)
-      audio.removeEventListener('error', onError)
-    }
-    const finish = () => {
-      if (settled) return
-      settled = true
-      cleanup()
-      resolve()
-    }
-    const onReady = () => {
-      if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) finish()
-    }
-    const onError = () => {
-      if (settled) return
-      settled = true
-      cleanup()
-      reject(new Error('音频解码失败'))
-    }
-    audio.addEventListener('loadeddata', onReady)
-    audio.addEventListener('canplay', onReady)
-    audio.addEventListener('canplaythrough', onReady)
-    audio.addEventListener('error', onError)
-    onReady()
-  })
-}
-
-interface ClaimState {
-  cardKey: string
-  correct: boolean | null
-}
-
-type BattleAnimation =
-  | { id: number; kind: 'claim'; playerId: OnlinePlayerId; cardKey: string }
-  | { id: number; kind: 'wrong'; playerId: OnlinePlayerId; cardKey: string }
-  | { id: number; kind: 'transfer'; from: OnlinePlayerId; to: OnlinePlayerId; cardKey: string; automatic: boolean }
-  | {
-      id: number
-      kind: 'layout'
-      playerId: OnlinePlayerId
-      cardKey: string
-      sourceSlot: number
-      targetSlot: number | null
-      exchangeCardKey: string | null
-    }
-  | { id: number; kind: 'discard'; winner: OnlinePlayerId | null; cardKey: string }
-
-type BattleAnimationPayload =
-  | Omit<Extract<BattleAnimation, { kind: 'claim' }>, 'id'>
-  | Omit<Extract<BattleAnimation, { kind: 'wrong' }>, 'id'>
-  | Omit<Extract<BattleAnimation, { kind: 'transfer' }>, 'id'>
-  | Omit<Extract<BattleAnimation, { kind: 'layout' }>, 'id'>
-  | Omit<Extract<BattleAnimation, { kind: 'discard' }>, 'id'>
-
-const BATTLE_ANIMATION_DURATION_MS = 2_400
-const BATTLE_ANIMATION_DEDUPE_WINDOW_MS = 1_200
-const BATTLE_ANIMATION_LOCAL_ECHO_WINDOW_MS = 8_000
-const MAX_BATTLE_ANIMATION_QUEUE = 8
-
-function battleAnimationKey(payload: BattleAnimationPayload | BattleAnimation) {
-  switch (payload.kind) {
-    case 'claim':
-    case 'wrong':
-      return `${payload.kind}:${payload.playerId}:${payload.cardKey}`
-    case 'transfer':
-      return `${payload.kind}:${payload.from}:${payload.to}:${payload.cardKey}:${payload.automatic ? 'auto' : 'manual'}`
-    case 'layout':
-      return `${payload.kind}:${payload.playerId}:${payload.cardKey}:${payload.sourceSlot}:${payload.targetSlot ?? 'none'}:${payload.exchangeCardKey || ''}`
-    case 'discard':
-      return `${payload.kind}:${payload.winner || 'none'}:${payload.cardKey}`
-  }
-}
-
-function createLayoutAnimation(
-  before: Array<string | null> | null | undefined,
-  after: Array<string | null> | null | undefined,
-  playerId: OnlinePlayerId,
-): Extract<BattleAnimationPayload, { kind: 'layout' }> | null {
-  let changedIndex = -1
-  for (let index = 0; index < MAX_HAND_SLOTS; index += 1) {
-    if ((before?.[index] || null) !== (after?.[index] || null)) {
-      changedIndex = index
-      break
-    }
-  }
-  if (changedIndex < 0) return null
-
-  const beforeSlots = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => before?.[index] || null)
-  const afterSlots = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => after?.[index] || null)
-  const beforeKeys = beforeSlots.filter((key): key is string => Boolean(key))
-  const afterKeys = afterSlots.filter((key): key is string => Boolean(key))
-  const beforeSet = new Set(beforeKeys)
-  const afterSet = new Set(afterKeys)
-  if (
-    beforeKeys.length !== beforeSet.size ||
-    afterKeys.length !== afterSet.size ||
-    beforeKeys.length !== afterKeys.length ||
-    beforeKeys.some((key) => !afterSet.has(key)) ||
-    afterKeys.some((key) => !beforeSet.has(key))
-  ) {
-    return null
-  }
-
-  const movedKey = afterSlots.find(
-    (key, index) => Boolean(key) && key !== beforeSlots[index] && beforeSlots.indexOf(key) !== index,
-  )
-  const cardKey = movedKey || afterSlots[changedIndex] || beforeSlots[changedIndex]
-  if (!cardKey) return null
-  const sourceSlot = beforeSlots.indexOf(cardKey)
-  const targetSlot = afterSlots.indexOf(cardKey)
-  if (sourceSlot < 0 || targetSlot < 0 || sourceSlot === targetSlot) return null
-  const exchangeCardKey = beforeSlots[targetSlot] && beforeSlots[targetSlot] !== cardKey ? beforeSlots[targetSlot] : null
-  return { kind: 'layout', playerId, cardKey, sourceSlot, targetSlot, exchangeCardKey }
-}
-
-function readNickname() {
-  try {
-    return localStorage.getItem('karuta-online-nickname') || '玩家'
-  } catch {
-    return '玩家'
-  }
-}
-
-function packageCardMeta(card: ServerPackageCatalogCard, packageId: string): OnlineCardView {
-  return {
-    key: card.key,
-    number: card.number,
-    imageName: card.imageName,
-    workName: card.workName,
-    imageUrl: serverCardImageUrl(packageId, card.key),
-  }
-}
-
-function otherPlayer(player: 'A' | 'B') {
-  return player === 'A' ? 'B' : 'A'
-}
-
-function normalizeBoardLayout(layout: Array<string | null> | null, fallback: string[]) {
-  const hand = new Set(fallback)
-  const used = new Set<string>()
-  const source = Array.from({ length: MAX_HAND_SLOTS }, (_, index) => {
-    const key = layout?.[index]
-    if (typeof key !== 'string' || !hand.has(key) || used.has(key)) return null
-    used.add(key)
-    return key
-  })
-  const unplaced = fallback.filter((key) => !used.has(key))
-  let nextUnplaced = 0
-  for (let index = 0; index < source.length && nextUnplaced < unplaced.length; index += 1) {
-    if (source[index] === null) source[index] = unplaced[nextUnplaced++]
-  }
-  return source
-}
-
-function mirrorBoardLayout(layout: Array<string | null> | null, fallback: string[]) {
-  const source = normalizeBoardLayout(layout, fallback)
-  const mirrored = Array<string | null>(MAX_HAND_SLOTS).fill(null)
-  for (let row = 0; row < 3; row += 1) {
-    for (let column = 0; column < 11; column += 1) {
-      mirrored[(2 - row) * 11 + column] = source[row * 11 + column]
-    }
-  }
-  return mirrored
-}
-
-function formatNetworkMetric(value: number | null) {
-  return value === null ? '测量中' : `${value} ms`
-}
+import {
+  BAN_SIZE,
+  BATTLE_ANIMATION_DEDUPE_WINDOW_MS,
+  BATTLE_ANIMATION_DURATION_MS,
+  BATTLE_STYLE_STORAGE_KEY,
+  DEFAULT_CANDIDATE_CARDS,
+  DRAFT_SELECTION_SIZE,
+  EMPTY_CARD_KEYS,
+  MAX_BATTLE_ANIMATION_QUEUE,
+  MATCH_AUDIO_CONCURRENCY,
+  MAX_CANDIDATE_CARDS,
+  MAX_HAND_SLOTS,
+  MIN_CANDIDATE_CARDS,
+  ONLINE_VOLUME_STORAGE_KEY,
+  REST_AUDIO_VOLUME,
+} from './online/onlineConstants'
+import type { AudioStatus, BattleAnimation, BattleAnimationPayload, BattleStyle, ClaimState } from './online/onlineTypes'
+import {
+  acknowledgeRoundAudio,
+  resetRoundPlaybackToStart,
+  battleAnimationKey,
+  clampOnlineVolume,
+  createLayoutAnimation,
+  createSilentAudioUrl,
+  isMediaPlayable,
+  mediaHasUrl,
+  mirrorBoardLayout,
+  otherPlayer,
+  readBattleStyle,
+  readNickname,
+  readOnlineVolume,
+  scheduleCountdown,
+  syncRoundPlayback,
+  waitForMediaReady,
+} from './online/onlineHelpers'
+import {
+  BattleAnimationOverlay,
+  HandArea,
+  NetworkFairness,
+  OnlineVolumeControl,
+  ScoreCard,
+  SpectatorMatchView,
+  TransferPanel,
+} from './online/onlineViews'
+import { useOnlineBoardDrag } from './online/useOnlineBoardDrag'
 
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
@@ -344,6 +115,9 @@ export function OnlinePage() {
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('idle')
   const [audioRetryNonce, setAudioRetryNonce] = useState(0)
   const [localAudioReady, setLocalAudioReady] = useState(false)
+  const [matchAudio, setMatchAudio] = useState<{ urls: string[]; total: number } | null>(null)
+  const [matchAudioLoaded, setMatchAudioLoaded] = useState(0)
+  const matchAudioReadySentRef = useRef<string | null>(null)
   const [onlineVolume, setOnlineVolumeState] = useState(readOnlineVolume)
   const [connected, setConnected] = useState(socket.connected)
   const [disconnectReason, setDisconnectReason] = useState<OnlineDisconnectReason | null>(null)
@@ -362,19 +136,14 @@ export function OnlinePage() {
   const battleAnimationQueueRef = useRef<BattleAnimation[]>([])
   const recentBattleAnimationKeysRef = useRef(new Map<string, number>())
   const pendingLocalLayoutKeysRef = useRef(new Map<string, number>())
+  const clearDragRef = useRef<() => void>(() => {})
   const [boardSlots, setBoardSlots] = useState<Array<string | null>>(() => Array(MAX_HAND_SLOTS).fill(null))
-  const [draggingKey, setDraggingKey] = useState<string | null>(null)
-  const [dragOverSlot, setDragOverSlot] = useState<number | null>(null)
   const [draftSelection, setDraftSelection] = useState<Set<string>>(new Set())
   const [draftBans, setDraftBans] = useState<Set<string>>(new Set())
   const [arrangeRemaining, setArrangeRemaining] = useState(0)
   const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(new Set())
   const [pinMode, setPinMode] = useState(false)
   const [battleStyle, setBattleStyle] = useState<BattleStyle>(readBattleStyle)
-  const draggingKeyRef = useRef<string | null>(null)
-  const dragOverSlotRef = useRef<number | null>(null)
-  const pointerPositionRef = useRef<{ clientX: number; clientY: number } | null>(null)
-  const pointerFrameRef = useRef<number | null>(null)
   const announcedArrangeReadyRef = useRef<number | null>(null)
   const announcedRestReadyRef = useRef<number | null>(null)
   const publishedLayoutRoundRef = useRef<number | null>(null)
@@ -578,10 +347,7 @@ export function OnlinePage() {
           roomRef.current = incoming.room
           setRoom(incoming.room)
           if (previousPhase === 'arrange' && incoming.room.phase !== 'arrange') {
-            draggingKeyRef.current = null
-            dragOverSlotRef.current = null
-            setDraggingKey(null)
-            setDragOverSlot(null)
+            clearDragRef.current()
           }
           setLastResult((previous) => (incoming.room.phase === 'playing' ? previous : null))
           if (incoming.room.phase === 'lobby') {
@@ -613,6 +379,14 @@ export function OnlinePage() {
             }
           })
           break
+        case 'matchAudio':
+          matchAudioReadySentRef.current = null
+          setMatchAudio({
+            urls: incoming.tracks.map((track) => track.audioUrl),
+            total: incoming.total || incoming.tracks.length,
+          })
+          setMatchAudioLoaded(0)
+          break
         case 'roundPrepare':
           clearBattleAnimations()
           audioReadySentRef.current = null
@@ -635,10 +409,7 @@ export function OnlinePage() {
           setOpponentClaim(null)
           setClaimsByPlayer({ A: null, B: null })
           setRoundRemaining(0)
-          draggingKeyRef.current = null
-          dragOverSlotRef.current = null
-          setDraggingKey(null)
-          setDragOverSlot(null)
+          clearDragRef.current()
           break
         case 'claimFeedback':
           const nextClaim = { cardKey: incoming.cardKey, correct: incoming.correct }
@@ -718,6 +489,7 @@ export function OnlinePage() {
       setDisconnectReason(nextConnected ? null : reason || 'network')
       if (!nextConnected) {
         audioReadySentRef.current = null
+        matchAudioReadySentRef.current = null
         // Incremental events may be missed while the socket is down. The next
         // room snapshot/replay is authoritative. Keep the round visible while
         // reconnecting so the player is not left with an empty, non-actionable
@@ -730,7 +502,11 @@ export function OnlinePage() {
           reason === 'replaced' ? '此房间已在其他页面恢复连接，当前页面已停止重连' : previous || '连接已断开，正在尝试恢复对局…',
         )
       } else {
-        setMessage((previous) => (previous === '连接已断开，正在尝试恢复对局…' ? null : previous))
+        setMessage((previous) =>
+          previous === '连接已断开，正在尝试恢复对局…' || previous === '无法连接在线歌牌服务，请确认服务器已启动'
+            ? null
+            : previous,
+        )
       }
     })
     void socket
@@ -762,86 +538,84 @@ export function OnlinePage() {
     }
   }, [])
 
+  const listenUrl =
+    room?.phase === 'playing' && !matchOver ? round?.audioUrl || roundPreparation?.audioUrl || null : null
+  const restClockActive = Boolean(
+    room?.phase === 'playing' &&
+      !listenUrl &&
+      room.restEndsAtServerTime &&
+      restRemaining > 0 &&
+      !matchOver,
+  )
+  const restActive = restClockActive
+  const audioSource = listenUrl || (restClockActive ? room?.restAudioUrl || null : null)
+  const audioRole = listenUrl ? 'listen' : audioSource ? 'rest' : null
+  const playId = listenUrl ? (round?.playId ?? round?.roundNo ?? roundPreparation?.playId ?? roundPreparation?.roundNo ?? null) : null
+  const audioSession = audioSource ? `${audioRole}:${playId || 'rest'}:${audioSource}` : null
+
   useEffect(() => {
     const audio = audioRef.current
-    const source = round?.audioUrl || roundPreparation?.audioUrl || room?.restAudioUrl || null
-    const preparingRound = Boolean(roundPreparation && !round)
+    const source = audioSource
+    const session = audioSession
+    const role = audioRole
     const generation = audioGenerationRef.current + 1
     audioGenerationRef.current = generation
-    if (!source || !audio) {
+    if (!source || !session || !audio) {
       if (audio) audio.pause()
       setLocalAudioReady(false)
       setAudioStatus(audioUnlockedRef.current ? 'ready' : 'idle')
       return
     }
 
-    setAudioStatus('loading')
-    setLocalAudioReady(false)
-    audio.pause()
-    let playTimer: number | null = null
+    const cached = localAudioUrlRef.current
+    const attachedToSource = Boolean(cached && cached.source === source && mediaHasUrl(audio, cached.url))
+    if (!attachedToSource) {
+      setAudioStatus('loading')
+      setLocalAudioReady(false)
+      audio.pause()
+    }
     let cancelled = false
-
-    const ensureLocalAudio = async () => {
-      const cached = localAudioUrlRef.current
-      if (cached?.source === source) return cached.url
-      const blob = await preloadOnlineAudio(source)
-      if (cancelled || generation !== audioGenerationRef.current) return null
-      const url = URL.createObjectURL(blob)
-      const previous = localAudioUrlRef.current
-      localAudioUrlRef.current = { source, url }
-      if (previous && previous.url !== url) URL.revokeObjectURL(previous.url)
-      return url
-    }
-
-    const playRoundAudio = async () => {
-      if (!round || cancelled || generation !== audioGenerationRef.current) return
-      const localStart = socket.toLocalTime(round.startAtServerTime)
-      const elapsedMs = Math.max(0, Date.now() - localStart)
-      if (elapsedMs > round.windowMs) return
-      audio.currentTime = elapsedMs / 1000
-      try {
-        await audio.play()
-        if (generation === audioGenerationRef.current) {
-          audioUnlockedRef.current = true
-          setAudioStatus('playing')
-        }
-      } catch (error: unknown) {
-        if (generation !== audioGenerationRef.current) return
-        setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
-      }
-    }
 
     const prepare = async () => {
       try {
-        const localUrl = await ensureLocalAudio()
+        const existing = localAudioUrlRef.current
+        let localUrl = existing?.source === source ? existing.url : null
+        if (!localUrl) {
+          const blob = await preloadOnlineAudio(source)
+          if (cancelled || generation !== audioGenerationRef.current) return
+          localUrl = URL.createObjectURL(blob)
+          const previous = localAudioUrlRef.current
+          localAudioUrlRef.current = { source, url: localUrl }
+          if (previous && previous.url !== localUrl) URL.revokeObjectURL(previous.url)
+        }
         if (!localUrl || cancelled || generation !== audioGenerationRef.current) return
-        if (audio.src !== localUrl) audio.src = localUrl
+
+        if (!mediaHasUrl(audio, localUrl)) audio.src = localUrl
+        // Reload even when the URL is unchanged. This is required after a
+        // decode/network error; otherwise the retry button only re-runs the
+        // promise and leaves the media element stuck in its error state.
         audio.preload = 'auto'
-        audio.muted = false
-        audio.volume = onlineVolumeRef.current * (round ? 1 : REST_AUDIO_VOLUME)
         audio.load()
+        audio.muted = false
+        audio.volume = onlineVolumeRef.current * (role === 'rest' ? REST_AUDIO_VOLUME : 1)
+        if (role === 'rest' || !attachedToSource) resetRoundPlaybackToStart(audio)
         await waitForMediaReady(audio)
         if (cancelled || generation !== audioGenerationRef.current) return
         setLocalAudioReady(true)
 
-        if (preparingRound) {
-          setAudioStatus('loaded')
-          const prepared = roundPreparationRef.current
-          const playerId = roomRef.current?.you
-          const readyKey = prepared ? `${prepared.roundNo}:${prepared.audioUrl}` : null
-          if (prepared && playerId && audioReadySentRef.current !== readyKey) {
-            if (socket.send({ t: 'audioReady', roundNo: prepared.roundNo })) audioReadySentRef.current = readyKey
+        if (role === 'listen') {
+          const preparing = Boolean(roundPreparationRef.current && !roundRef.current)
+          if (preparing) {
+            setAudioStatus('loaded')
+            const prepared = roundPreparationRef.current
+            if (prepared && roomRef.current?.you) {
+              acknowledgeRoundAudio(socket, prepared.roundNo, prepared.audioUrl, audioReadySentRef)
+            }
           }
           return
         }
 
-        if (round) {
-          const localStart = socket.toLocalTime(round.startAtServerTime)
-          const delay = Math.max(0, localStart - Date.now())
-          playTimer = window.setTimeout(() => void playRoundAudio(), delay)
-          return
-        }
-
+        resetRoundPlaybackToStart(audio)
         try {
           await audio.play()
           if (generation === audioGenerationRef.current) {
@@ -863,10 +637,84 @@ export function OnlinePage() {
     void prepare()
     return () => {
       cancelled = true
+      audio.pause()
+    }
+  }, [audioRetryNonce, audioRole, audioSession, audioSource, socket])
+
+  useEffect(() => {
+    const audio = audioRef.current
+    if (audioRole !== 'listen' || !round || !audio) return
+    let cancelled = false
+    let playTimer: number | null = null
+
+    const start = () => {
+      if (!localAudioReady && !isMediaPlayable(audio)) return
+      audio.muted = false
+      audio.volume = onlineVolumeRef.current
+      const localStart = socket.toLocalTime(round.startAtServerTime)
+      playTimer = window.setTimeout(() => {
+        if (cancelled) return
+        const elapsedMs = Math.max(0, Date.now() - localStart)
+        if (elapsedMs > round.windowMs) return
+        if (!syncRoundPlayback(audio, elapsedMs)) return
+        void audio
+          .play()
+          .then(() => {
+            if (cancelled) return
+            audioUnlockedRef.current = true
+            setAudioStatus('playing')
+          })
+          .catch((error: unknown) => {
+            if (cancelled) return
+            setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
+          })
+      }, Math.max(0, localStart - Date.now()))
+    }
+
+    start()
+    return () => {
+      cancelled = true
       if (playTimer !== null) window.clearTimeout(playTimer)
       audio.pause()
     }
-  }, [audioRetryNonce, room?.restAudioUrl, round, roundPreparation, socket])
+  }, [audioRole, localAudioReady, playId, round, socket])
+
+  useEffect(() => {
+    if (!connected || round || room?.spectator || !localAudioReady) return
+    const prepared = roundPreparation
+    if (!prepared || !room?.you) return
+    acknowledgeRoundAudio(socket, prepared.roundNo, prepared.audioUrl, audioReadySentRef)
+  }, [connected, localAudioReady, round, roundPreparation, room?.spectator, room?.you, socket])
+
+  useEffect(() => {
+    if (!connected || !matchAudio?.urls.length || room?.spectator || !room?.you) return
+    let cancelled = false
+    const key = matchAudio.urls.join('\n')
+    setMatchAudioLoaded(0)
+    void preloadOnlineAudioMany(matchAudio.urls, {
+      concurrency: MATCH_AUDIO_CONCURRENCY,
+      onProgress: (done, total) => {
+        if (!cancelled) setMatchAudioLoaded(Math.min(done, total))
+      },
+    })
+      .then(() => {
+        if (cancelled) return
+        setMatchAudioLoaded(matchAudio.total)
+        if (!connected || !socket.connected || roomRef.current?.spectator || !roomRef.current?.you) return
+        if (matchAudioReadySentRef.current === key) return
+        if (!socket.send({ t: 'matchAudioReady' })) return
+        matchAudioReadySentRef.current = key
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        matchAudioReadySentRef.current = null
+        setAudioStatus('error')
+        setMessage(error instanceof Error ? error.message : '场上音频预加载失败，请点击重试音频')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [connected, matchAudio, room?.spectator, room?.you, socket])
 
   useEffect(() => {
     if (!round) {
@@ -896,8 +744,8 @@ export function OnlinePage() {
   useEffect(() => {
     onlineVolumeRef.current = onlineVolume
     const audio = audioRef.current
-    if (audio) audio.volume = onlineVolume * (round ? 1 : REST_AUDIO_VOLUME)
-  }, [onlineVolume, round])
+    if (audio) audio.volume = onlineVolume * (audioRole === 'rest' ? REST_AUDIO_VOLUME : 1)
+  }, [audioRole, onlineVolume])
 
   useEffect(() => {
     if (room?.phase !== 'arrange' || !room.draft.arrangeEndsAtServerTime) {
@@ -982,12 +830,7 @@ export function OnlinePage() {
       if (next.size === previous.size && [...next].every((key) => previous.has(key))) return previous
       return next
     })
-    if (!keys.length) {
-      draggingKeyRef.current = null
-      dragOverSlotRef.current = null
-      setDraggingKey(null)
-      setDragOverSlot(null)
-    }
+    if (!keys.length) clearDragRef.current()
   }, [ownHandKeys, ownHandSignature])
 
   const orderedRoomCards = useMemo(() => {
@@ -1025,10 +868,12 @@ export function OnlinePage() {
     const byKey = new Map(roomCards.map((card) => [card.key, card]))
     return room?.draft.exchangeCardKeys.map((key) => byKey.get(key)).filter((card): card is OnlineCardView => Boolean(card)) || []
   }, [room?.draft.exchangeCardKeys, roomCards])
-  const isResting = Boolean(room?.phase === 'playing' && restRemaining > 0 && !round && !matchOver)
+  const isResting = Boolean(
+    !listenUrl && (restActive || (room?.phase === 'playing' && restRemaining > 0 && !matchOver)),
+  )
   const isGivingCard = Boolean(room?.pendingTransfer?.to === room?.you)
   const canArrange = Boolean(
-    ((room?.phase === 'arrange' && arrangeRemaining > 0) || isResting) && !matchOver && !round && !room?.pendingTransfer && !room?.spectator,
+    (room?.phase === 'arrange' || isResting) && !matchOver && !room?.pendingTransfer && !room?.spectator,
   )
 
   useEffect(() => {
@@ -1118,6 +963,9 @@ export function OnlinePage() {
     roomRef.current = null
     setRoom(null)
     setRound(null)
+    setMatchAudio(null)
+    setMatchAudioLoaded(0)
+    matchAudioReadySentRef.current = null
     setLastResult(null)
     setMatchOver(null)
     clearBattleAnimations()
@@ -1130,192 +978,40 @@ export function OnlinePage() {
     setPinnedKeys(new Set())
     setPinMode(false)
     setMessage(null)
+    clearDragRef.current()
     void socket.connect().then(() => socket.send({ t: 'listRooms' }))
   }, [clearBattleAnimations, socket])
 
-  const moveCardToSlot = useCallback(
-    (sourceKey: string, targetSlot: number) => {
-      if (!canArrange || !sourceKey) return
-      const target = Math.max(0, Math.min(MAX_HAND_SLOTS - 1, Math.round(targetSlot)))
-      const sourceIndex = boardSlots.indexOf(sourceKey)
-      if (sourceIndex < 0 || sourceIndex === target) return
-      const preview = [...boardSlots]
-      const displaced = preview[target]
-      preview[target] = sourceKey
-      preview[sourceIndex] = displaced && displaced !== sourceKey ? displaced : null
-      const layoutAnimation = createLayoutAnimation(boardSlots, preview, roomRef.current?.you || 'A')
-      if (layoutAnimation) {
-        pendingLocalLayoutKeysRef.current.set(battleAnimationKey(layoutAnimation), Date.now() + BATTLE_ANIMATION_LOCAL_ECHO_WINDOW_MS)
-        showBattleAnimation(layoutAnimation)
-      }
-      setBoardSlots((previous) => {
-        const next = [...previous]
-        const currentIndex = next.indexOf(sourceKey)
-        if (currentIndex < 0 || currentIndex === target) return previous
-        const displaced = next[target]
-        next[target] = sourceKey
-        next[currentIndex] = displaced && displaced !== sourceKey ? displaced : null
-        return next
-      })
-    },
-    [boardSlots, canArrange, showBattleAnimation],
-  )
-
-  const cancelPointerFrame = useCallback(() => {
-    if (pointerFrameRef.current !== null) window.cancelAnimationFrame(pointerFrameRef.current)
-    pointerFrameRef.current = null
-    pointerPositionRef.current = null
-  }, [])
-
-  const updateDragOverSlot = useCallback(
-    (clientX: number, clientY: number) => {
-      if (!canArrange || !draggingKeyRef.current) return
-      const hovered = document.elementFromPoint(clientX, clientY)
-      const slotElement = hovered instanceof HTMLElement ? hovered.closest<HTMLElement>('[data-online-slot-index]') : null
-      const slotIndex = Number.parseInt(slotElement?.dataset.onlineSlotIndex || '', 10)
-      if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= MAX_HAND_SLOTS || slotIndex === dragOverSlotRef.current) return
-      dragOverSlotRef.current = slotIndex
-      setDragOverSlot(slotIndex)
-    },
-    [canArrange],
-  )
-
-  const clearDrag = useCallback(() => {
-    cancelPointerFrame()
-    draggingKeyRef.current = null
-    dragOverSlotRef.current = null
-    setDraggingKey(null)
-    setDragOverSlot(null)
-  }, [cancelPointerFrame])
-
+  const {
+    draggingKey,
+    dragOverSlot,
+    clearDrag,
+    handleDragStart,
+    handleDragOver,
+    handleDrop,
+    handleDragEnd,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handlePointerCancel,
+    selectArrangeCard,
+    handleArrangeSlotClick,
+  } = useOnlineBoardDrag({
+    canArrange,
+    pinMode,
+    boardSlots,
+    setBoardSlots,
+    viewerId,
+    pendingLocalLayoutKeysRef,
+    showBattleAnimation,
+  })
   useEffect(() => {
-    if (canArrange || !draggingKeyRef.current) return
-    clearDrag()
-  }, [canArrange, clearDrag])
+    clearDragRef.current = clearDrag
+    return () => {
+      if (clearDragRef.current === clearDrag) clearDragRef.current = () => {}
+    }
+  }, [clearDrag])
 
-  useEffect(() => {
-    return () => cancelPointerFrame()
-  }, [cancelPointerFrame])
-
-  const handleDragStart = useCallback(
-    (event: DragEvent<HTMLButtonElement>, cardKey: string) => {
-      if (!canArrange) {
-        event.preventDefault()
-        return
-      }
-      draggingKeyRef.current = cardKey
-      dragOverSlotRef.current = Math.max(0, boardSlots.indexOf(cardKey))
-      setDraggingKey(cardKey)
-      setDragOverSlot(dragOverSlotRef.current)
-      event.dataTransfer.effectAllowed = 'move'
-      event.dataTransfer.setData('text/plain', cardKey)
-    },
-    [boardSlots, canArrange],
-  )
-
-  const handleDragOver = useCallback(
-    (event: DragEvent<HTMLButtonElement>, slotIndex: number) => {
-      if (!canArrange || !draggingKeyRef.current) return
-      event.preventDefault()
-      event.dataTransfer.dropEffect = 'move'
-      dragOverSlotRef.current = slotIndex
-      setDragOverSlot(slotIndex)
-    },
-    [canArrange],
-  )
-
-  const handleDrop = useCallback(
-    (event: DragEvent<HTMLButtonElement>, targetSlot: number) => {
-      if (!canArrange) return
-      event.preventDefault()
-      const sourceKey = event.dataTransfer.getData('text/plain') || draggingKeyRef.current || ''
-      moveCardToSlot(sourceKey, targetSlot)
-      clearDrag()
-    },
-    [canArrange, clearDrag, moveCardToSlot],
-  )
-
-  const handleDragEnd = clearDrag
-
-  const handlePointerDown = useCallback(
-    (event: PointerEvent<HTMLButtonElement>, cardKey: string) => {
-      if (!canArrange || event.pointerType === 'touch') return
-      event.preventDefault()
-      draggingKeyRef.current = cardKey
-      dragOverSlotRef.current = Math.max(0, boardSlots.indexOf(cardKey))
-      setDraggingKey(cardKey)
-      setDragOverSlot(dragOverSlotRef.current)
-      event.currentTarget.setPointerCapture(event.pointerId)
-    },
-    [boardSlots, canArrange],
-  )
-
-  const handlePointerMove = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (!canArrange || event.pointerType === 'touch' || !draggingKeyRef.current) return
-      pointerPositionRef.current = { clientX: event.clientX, clientY: event.clientY }
-      if (pointerFrameRef.current !== null) return
-      pointerFrameRef.current = window.requestAnimationFrame(() => {
-        pointerFrameRef.current = null
-        const point = pointerPositionRef.current
-        pointerPositionRef.current = null
-        if (point) updateDragOverSlot(point.clientX, point.clientY)
-      })
-    },
-    [canArrange, updateDragOverSlot],
-  )
-
-  const handlePointerUp = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (event.pointerType === 'touch') return
-      if (canArrange && draggingKeyRef.current && dragOverSlotRef.current !== null) {
-        cancelPointerFrame()
-        updateDragOverSlot(event.clientX, event.clientY)
-        moveCardToSlot(draggingKeyRef.current, dragOverSlotRef.current)
-      }
-      clearDrag()
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    },
-    [canArrange, cancelPointerFrame, clearDrag, moveCardToSlot, updateDragOverSlot],
-  )
-
-  const handlePointerCancel = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (event.pointerType === 'touch') return
-      clearDrag()
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    },
-    [clearDrag],
-  )
-
-  const selectArrangeCard = useCallback(
-    (cardKey: string) => {
-      if (!canArrange || pinMode) return
-      const slotIndex = boardSlots.indexOf(cardKey)
-      if (slotIndex < 0) return
-      if (draggingKeyRef.current === cardKey) {
-        clearDrag()
-        return
-      }
-      cancelPointerFrame()
-      draggingKeyRef.current = cardKey
-      dragOverSlotRef.current = slotIndex
-      setDraggingKey(cardKey)
-      setDragOverSlot(slotIndex)
-    },
-    [boardSlots, canArrange, cancelPointerFrame, clearDrag, pinMode],
-  )
-
-  const handleArrangeSlotClick = useCallback(
-    (targetSlot: number) => {
-      if (!canArrange) return
-      const sourceKey = draggingKeyRef.current
-      if (!sourceKey) return
-      moveCardToSlot(sourceKey, targetSlot)
-      clearDrag()
-    },
-    [canArrange, clearDrag, moveCardToSlot],
-  )
 
   const toggleSelected = useCallback((cardKey: string) => {
     setSelectedIds((previous) => {
@@ -1447,7 +1143,11 @@ export function OnlinePage() {
   const unlockAudio = useCallback(() => {
     if (audioUnlockingRef.current) return
     audioUnlockingRef.current = true
-    if (audioStatus === 'error') setAudioRetryNonce((previous) => previous + 1)
+    if (audioStatus === 'error') {
+      setAudioRetryNonce((previous) => previous + 1)
+      matchAudioReadySentRef.current = null
+      setMatchAudio((previous) => (previous ? { urls: previous.urls, total: previous.total } : previous))
+    }
     const audio = audioRef.current
     let context = audioContextRef.current
     try {
@@ -1506,7 +1206,10 @@ export function OnlinePage() {
         audioUnlockingRef.current = false
         return
       }
-      audio.currentTime = elapsedMs / 1000
+      if (!syncRoundPlayback(audio, elapsedMs)) {
+        audioUnlockingRef.current = false
+        return
+      }
     }
     let playPromise: Promise<void>
     try {
@@ -1553,136 +1256,40 @@ export function OnlinePage() {
 
   if (!room) {
     return (
-      <div className="online-page">
-        <section className="hero">
-          <div className="row spread">
-            <div>
-              <h1>在线 1v1 歌牌对战</h1>
-              <p>双方看到同一组歌牌卡面，听到歌曲后抢先点击对应卡牌。</p>
-            </div>
-            <div className="row online-lobby-actions">
-              <span className={`connection-chip${connected ? ' online' : ''}`}>
-                {connected ? '在线服务已连接' : '正在连接…'}
-              </span>
-              <button className="btn btn-secondary online-lobby-audio" type="button" onClick={unlockAudio}>
-                {audioButtonLabel}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <div className="online-lobby-grid">
-          <section className="panel warm stack">
-            <div className="row spread">
-              <strong>创建房间</strong>
-              <span className="muted small">服务器牌组提供同一套歌牌卡面</span>
-            </div>
-            <div className="field">
-              <label htmlFor="onlineNickname">你的昵称</label>
-              <input id="onlineNickname" value={nickname} maxLength={20} onChange={(event) => setNickname(event.target.value)} />
-            </div>
-            <div className="field">
-              <label htmlFor="roomName">房间名称</label>
-              <input id="roomName" value={roomName} maxLength={40} onChange={(event) => setRoomName(event.target.value)} />
-            </div>
-            <div className="field">
-              <label htmlFor="onlineDeck">使用服务器牌组</label>
-              <select id="onlineDeck" value={activePackageId} onChange={(event) => setSelectedPackageId(event.target.value)} disabled={packagesLoading || catalogLoading}>
-                <option value="">{onlinePackages.length ? '请选择服务器牌组' : '服务器暂无可用牌组'}</option>
-                {onlinePackages.map(({ meta, serverPackage }) => (
-                  <option key={serverPackage.id} value={serverPackage.id}>
-                    {meta.name} · {serverPackage.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {!packagesLoading && !onlinePackages.length ? (
-              <p className="notice warn">在线歌牌只使用服务器上已发布的牌组，请联系管理员检查 data-packages。</p>
-            ) : null}
-            <div className="row">
-              <div className="field" style={{ flex: '0 0 120px' }}>
-                 <label htmlFor="boardCount">候选牌数量</label>
-                 <input id="boardCount" type="number" min={MIN_CANDIDATE_CARDS} max={MAX_CANDIDATE_CARDS} step={1} value={boardCount} onChange={(event) => setBoardSize(Number(event.target.value))} />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label htmlFor="onlineSearch">筛选卡面</label>
-                <input id="onlineSearch" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="作品名或牌号" />
-              </div>
-            </div>
-            <div className="row spread draft-selection-summary">
-              <p className="muted small">已选 {selectedIds.size} / {boardCount} 张；超过 200 张时服务器会先随机抽 200 张，再由双方各分到 100 张并各选 30 张；奇数会先弃置 1 张。</p>
-              <button className="btn btn-secondary" type="button" onClick={selectAllCandidates} disabled={!eligibleCards.length}>全选服务器牌组</button>
-            </div>
-            {catalogLoading ? <div className="empty-state">正在读取服务器牌组目录…</div> : null}
-            {!catalogLoading && catalog?.packageId === activePackageId && eligibleCards.length ? (
-              <VirtualServerCardGrid
-                cards={visibleCards}
-                packageId={activePackageId}
-                selected={selectedIds}
-                onToggle={toggleSelected}
-              />
-            ) : null}
-            {!catalogLoading && !eligibleCards.length ? <div className="empty-state">服务器牌组没有可用于在线对战的卡牌</div> : null}
-            <button className="btn btn-primary btn-lg" type="button" onClick={() => void createRoom()} disabled={busy || !connected || catalogLoading || !selectedPackage}>
-              {busy ? '创建中…' : '创建歌牌房间'}
-            </button>
-          </section>
-
-          <section className="panel cool stack">
-            <strong>加入房间</strong>
-            <p className="muted small">输入朋友分享的 6 位房间码；加入后直接读取服务器牌组，不需要本机预先导入 ZIP。</p>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label htmlFor="joinCode">房间码</label>
-                <input id="joinCode" value={joinCode} maxLength={6} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="例如 A7K2PM" />
-              </div>
-              <button className="btn btn-primary" type="button" onClick={() => void joinRoom()} disabled={busy || !connected}>
-                加入
-              </button>
-            </div>
-            <div className="row spread">
-              <strong>公开房间</strong>
-              <button className="btn btn-secondary" type="button" onClick={() => socket.send({ t: 'listRooms' })} disabled={!connected}>
-                刷新
-              </button>
-            </div>
-            <div className="room-list">
-              {!rooms.length ? <div className="empty-state">暂时没有公开房间</div> : null}
-              {rooms.map((item) => (
-                <button
-                  key={item.code}
-                  type="button"
-                  className={`room-list-item${item.status === 'playing' ? ' spectateable' : ''}`}
-                  onClick={() => (item.status === 'playing' ? void spectateRoom(item.code) : item.status === 'preparing' ? undefined : setJoinCode(item.code))}
-                  disabled={busy || item.status === 'preparing'}
-                  aria-label={item.status === 'playing' ? `观战 ${item.name}` : item.status === 'preparing' ? `准备中 ${item.name}` : `填写房间码 ${item.name}`}
-                >
-                  <span>
-                    <strong>{item.name}</strong>
-                    <span className="muted small">{item.deckName} · {item.players}/2 人 · {item.status === 'playing' ? '对局进行中，点击观战' : item.status === 'preparing' ? '双方准备中' : item.status === 'full' ? '等待加入' : '等待对手'}</span>
-                  </span>
-                  <span className={`room-code${item.status === 'playing' ? ' spectate-label' : ''}`}>{item.status === 'playing' ? '观战' : item.status === 'preparing' ? '准备中' : item.code}</span>
-                </button>
-              ))}
-            </div>
-            <div className="online-rules stack">
-              <strong>玩法</strong>
-              <span className="muted small">1. 候选牌随机分成两份，双方各选 30 张并互换</span>
-              <span className="muted small">2. 双方各从收到的 30 张中 BAN 5 张，剩余各 25 张</span>
-              <span className="muted small">3. 开局排牌 3 分钟；3×11 是 33 个固定可放置槽位，只能调整自己的牌区</span>
-              <span className="muted small">4. 空牌歌曲来自场外 20 首，单次出现后移出空牌池；没有对应卡面，点击任一卡面都会判错</span>
-              <span className="muted small">5. 普通歌曲选错或正确收取对手牌后，进入 40 秒休息交牌阶段</span>
-              <span className="muted small">6. 开局排牌和休息阶段都可提前准备；开局双方准备后 20 秒进入游戏，休息阶段双方准备后 5 秒进入下一回合</span>
-              <span className="muted small">7. 无需换牌的收牌结算后，或完成换牌后某方手牌为 0，该方立即获胜并结束对局</span>
-            </div>
-            <Link className="btn btn-secondary" to="/admin">
-              管理服务器牌组
-            </Link>
-          </section>
-        </div>
-
-        {message ? <div className="toast">{message}</div> : null}
-      </div>
+      <OnlineHall
+        connected={connected}
+        audioButtonLabel={audioButtonLabel}
+        onUnlockAudio={unlockAudio}
+        nickname={nickname}
+        onNicknameChange={setNickname}
+        roomName={roomName}
+        onRoomNameChange={setRoomName}
+        packagesLoading={packagesLoading}
+        catalogLoading={catalogLoading}
+        catalog={catalog}
+        activePackageId={activePackageId}
+        onPackageChange={setSelectedPackageId}
+        onlinePackages={onlinePackages}
+        selectedPackage={selectedPackage}
+        boardCount={boardCount}
+        onBoardCountChange={setBoardSize}
+        keyword={keyword}
+        onKeywordChange={setKeyword}
+        selectedIds={selectedIds}
+        eligibleCards={eligibleCards}
+        visibleCards={visibleCards}
+        onToggleCard={toggleSelected}
+        onSelectAll={selectAllCandidates}
+        onCreateRoom={() => void createRoom()}
+        onJoinRoom={() => void joinRoom()}
+        onSpectateRoom={(code) => void spectateRoom(code)}
+        joinCode={joinCode}
+        onJoinCodeChange={setJoinCode}
+        rooms={rooms}
+        socket={socket}
+        busy={busy}
+        message={message}
+      />
     )
   }
 
@@ -1713,108 +1320,49 @@ export function OnlinePage() {
   }
 
   if (room.phase === 'lobby') {
-    const ready = Boolean(me?.ready)
     return (
-      <div className="online-page">
-        <section className="hero">
-          <div className="row spread">
-            <div>
-              <h1>{room.name}</h1>
-              <p>房间码 <span className="room-code large">{room.code}</span> · {room.deckName}</p>
-            </div>
-            <div className="row online-room-actions">
-              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
-              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出房间</button>
-            </div>
-          </div>
-          <p className="muted small">把房间码分享给对手。双方直接使用服务器牌组看到同一套真实卡面，歌名不会在开局前下发。</p>
-        </section>
-
-        <section className="panel stack">
-          <div className="versus-players">
-            <PlayerBadge player={room.players.A} mine={room.you === 'A'} />
-            <span className="versus-mark">VS</span>
-            <PlayerBadge player={room.players.B} mine={room.you === 'B'} />
-          </div>
-          <NetworkFairness socket={socket} you={room.you} />
-          <div className="online-board compact">
-            {orderedRoomCards.map((meta) => (
-              <OnlineCardTile key={meta.key} meta={meta} available={false} thumbnail />
-            ))}
-          </div>
-          <div className="row spread">
-             <span className="muted small">候选牌 {room.cards.length} 张 · 准备后进入选牌、互换和 BAN</span>
-            <OnlineLobbyReadyButton socket={socket} room={room} opponent={opponent} ready={ready} />
-          </div>
-        </section>
-        {message ? <div className="toast">{message}</div> : null}
-      </div>
+      <OnlineRoomLobby
+        room={room}
+        opponent={opponent}
+        orderedRoomCards={orderedRoomCards}
+        canReconnect={canReconnect}
+        onReconnect={reconnectNow}
+        onLeave={leaveRoom}
+        socket={socket}
+        message={message}
+      />
     )
   }
 
   if (room.phase === 'draft_select') {
     return (
-      <div className="online-page">
-        <section className="hero">
-          <div className="row spread">
-            <div>
-              <h1>第一阶段 · 各自选牌</h1>
-              <p>{room.name} · 房间码 <span className="room-code">{room.code}</span></p>
-            </div>
-            <div className="row online-room-actions">
-              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
-              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
-            </div>
-          </div>
-          <p>服务器已经把候选牌随机分成两份。请只从你看到的这一份牌池中选择 30 张。</p>
-        </section>
-        <DraftCardPicker
-          title="从你的随机牌池选择 30 张"
-          description="选定后会锁定，等对手也完成选择；对手不会看到你的选择进度以外的内容。"
-          cards={draftPoolCards}
-          selected={draftSelection}
-          limit={DRAFT_SELECTION_SIZE}
-          opponentCount={room.draft.opponentSelectedCount}
-          opponentLabel="对手已选"
-          submitLabel="确认 30 张并进入互换"
-          onToggle={toggleDraftSelection}
-          onSubmit={submitDraftSelection}
-        />
-        {message ? <div className="toast">{message}</div> : null}
-      </div>
+      <OnlineDraftSelect
+        room={room}
+        cards={draftPoolCards}
+        selected={draftSelection}
+        canReconnect={canReconnect}
+        onReconnect={reconnectNow}
+        onLeave={leaveRoom}
+        onToggle={toggleDraftSelection}
+        onSubmit={submitDraftSelection}
+        message={message}
+      />
     )
   }
 
   if (room.phase === 'draft_ban') {
     return (
-      <div className="online-page">
-        <section className="hero">
-          <div className="row spread">
-            <div>
-              <h1>第二阶段 · 互换后 BAN 牌</h1>
-              <p>{room.name} · 你正在处理对手选出的 30 张牌</p>
-            </div>
-            <div className="row online-room-actions">
-              {canReconnect ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={reconnectNow}>立即重连</button> : null}
-              <button className="btn btn-secondary" type="button" onClick={leaveRoom}>退出本局</button>
-            </div>
-          </div>
-          <p>这些是对手选出的牌。请从中 BAN 5 张，剩余 25 张会成为你的起始牌区。</p>
-        </section>
-        <DraftCardPicker
-          title="从互换牌中 BAN 5 张"
-          description="BAN 只作用于你收到的这 30 张牌；双方完成后会同时进入三分钟排牌准备。"
-          cards={draftExchangeCards}
-          selected={draftBans}
-          limit={BAN_SIZE}
-          opponentCount={room.draft.opponentBannedCount}
-          opponentLabel="对手已 BAN"
-          submitLabel="确认 BAN 5 张并进入排牌"
-          onToggle={toggleDraftBan}
-          onSubmit={submitDraftBan}
-        />
-        {message ? <div className="toast">{message}</div> : null}
-      </div>
+      <OnlineDraftBan
+        room={room}
+        cards={draftExchangeCards}
+        selected={draftBans}
+        canReconnect={canReconnect}
+        onReconnect={reconnectNow}
+        onLeave={leaveRoom}
+        onToggle={toggleDraftBan}
+        onSubmit={submitDraftBan}
+        message={message}
+      />
     )
   }
 
@@ -1825,13 +1373,29 @@ export function OnlinePage() {
   const matchRounds = matchOver?.rounds || room.roundNo
   const isOpeningArrange = room.phase === 'arrange'
   const isPreparingRound = Boolean(roundPreparation && !round)
-  const canClaim = Boolean(round && !myClaim && !lastResult && !room.pendingTransfer && !matchIsOver)
+  const canClaim = Boolean(round && !isResting && !myClaim && !lastResult && !room.pendingTransfer && !matchIsOver)
   const restSeconds = Math.ceil(restRemaining / 1000)
   const arrangeReadySeconds = Math.ceil(arrangeReadyRemaining / 1000)
   const restReadySeconds = Math.ceil(restReadyRemaining / 1000)
   const readyRemaining = isOpeningArrange ? arrangeReadyRemaining : restReadyRemaining
   const readySeconds = isOpeningArrange ? arrangeReadySeconds : restReadySeconds
-  const stageLabel = matchIsOver ? '本局结束' : isOpeningArrange ? '开局排牌' : isPreparingRound ? '音频准备中' : isResting ? '休息阶段' : round ? '听歌抢牌' : '对局进行中'
+  const waitingMatchAudio = Boolean(room.waitingMatchAudio)
+  const matchAudioTotal = room.matchAudioTotal || matchAudio?.total || 0
+  const matchAudioProgress = matchAudioTotal > 0 ? `${matchAudioLoaded}/${matchAudioTotal}` : ''
+  const matchAudioPending = Boolean(matchAudioTotal && matchAudioLoaded < matchAudioTotal)
+  const stageLabel = matchIsOver
+    ? '本局结束'
+    : isOpeningArrange
+      ? waitingMatchAudio
+        ? '等待场上音频'
+        : '开局排牌'
+      : isPreparingRound
+        ? '音频准备中'
+        : isResting
+          ? '休息阶段'
+          : round
+            ? '听歌抢牌'
+            : '对局进行中'
   const isReadyWindow = !matchIsOver && (isOpeningArrange || isResting)
   const restReady = Boolean(me?.restReady)
   const opponentRestReady = Boolean(opponent?.restReady)
@@ -1843,13 +1407,19 @@ export function OnlinePage() {
       : '双方平手 · 对局已结束，最终牌区已保留'
     : isOpeningArrange
     ? arrangeReadyRemaining > 0
-      ? `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
-      : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
+      ? matchAudioPending
+        ? `双方已准备 · ${arrangeReadySeconds} 秒后开始 · 场上歌曲 ${matchAudioProgress}`
+        : `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
+      : waitingMatchAudio
+        ? `开局已推迟 · 等待双方场上歌曲就绪${matchAudioProgress ? ` · ${matchAudioProgress}` : ''}`
+        : matchAudioPending
+          ? `排牌准备中 · 场上歌曲 ${matchAudioProgress} · ${Math.ceil(arrangeRemaining / 1000)} 秒后尝试开始`
+          : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
     : isPreparingRound
       ? room.spectator
         ? '观战端正在本地完整预加载本回合音频'
         : me?.audioReady && opponent?.audioReady
-          ? '双方音频已完整加载 · 正在同步开始'
+          ? '双方音频已完整加载 · 等待服务器播放编号'
           : localAudioReady
             ? '你的音频已完整加载 · 等待对手音频'
             : '正在把本回合音频完整下载到本地'
@@ -1883,7 +1453,9 @@ export function OnlinePage() {
               {matchIsOver
                 ? `对局已结束 · 第 ${matchRounds} 回合 · 最终牌区已保留`
                 : isOpeningArrange
-                ? `剩余 ${Math.ceil(arrangeRemaining / 1000)} 秒完成自己的牌区布局 · ${ownHandKeys.length} 张手牌`
+                ? waitingMatchAudio
+                  ? `排牌时间已到，等待双方场上音频加载完成后再开局 · ${ownHandKeys.length} 张手牌`
+                  : `剩余 ${Math.ceil(arrangeRemaining / 1000)} 秒完成自己的牌区布局 · ${ownHandKeys.length} 张手牌`
                 : `第 ${room.roundNo || round?.roundNo || 0} 回合 · 场上实牌 ${room.remainingCardKeys.length} 张`}
             </p>
           </div>
@@ -1989,7 +1561,9 @@ export function OnlinePage() {
                 {matchIsOver
                   ? '—'
                   : isOpeningArrange
-                  ? `${arrangeReadyRemaining > 0 ? arrangeReadySeconds : Math.ceil(arrangeRemaining / 1000)} 秒`
+                  ? waitingMatchAudio
+                    ? '等待音频'
+                    : `${arrangeReadyRemaining > 0 ? arrangeReadySeconds : Math.ceil(arrangeRemaining / 1000)} 秒`
                   : isPreparingRound
                     ? '准备中'
                   : isResting
@@ -2120,771 +1694,6 @@ export function OnlinePage() {
       ) : null}
 
       {message ? <div className="toast">{message}</div> : null}
-    </div>
-  )
-}
-
-function handCardsForSpectator(room: OnlineRoomView, playerId: OnlinePlayerId) {
-  const player = room.players[playerId]
-  const handKeys = player?.handCardKeys || EMPTY_CARD_KEYS
-  const layout = player?.layoutCardKeys || null
-  const slotKeys = playerId === 'A' ? mirrorBoardLayout(layout, handKeys) : normalizeBoardLayout(layout, handKeys)
-  const byKey = new Map(room.cards.map((card) => [card.key, card]))
-  return slotKeys.map((key) => (key ? byKey.get(key) || null : null))
-}
-
-function playerName(room: OnlineRoomView, playerId: OnlinePlayerId) {
-  return room.players[playerId]?.nickname || `玩家 ${playerId}`
-}
-
-function BattleAnimationOverlay({ event, room }: { event: BattleAnimation | null; room: OnlineRoomView }) {
-  if (!event) return null
-  const card = room.cards.find((item) => item.key === event.cardKey)
-  if (!card) return null
-  const exchangeCard = event.kind === 'layout' && event.exchangeCardKey
-    ? room.cards.find((item) => item.key === event.exchangeCardKey) || null
-    : null
-  const playerId = event.kind === 'transfer' ? event.to : event.kind === 'discard' ? event.winner : event.playerId
-
-  const title =
-    event.kind === 'claim'
-      ? `${playerName(room, event.playerId)} 取到了牌`
-      : event.kind === 'wrong'
-        ? `${playerName(room, event.playerId)} 选错了`
-        : event.kind === 'transfer'
-          ? `${playerName(room, event.from)} → ${playerName(room, event.to)} 交牌`
-          : event.kind === 'discard'
-            ? `${event.winner ? playerName(room, event.winner) : '无人'} ${event.winner ? '的牌' : '选中的牌'}进入弃牌堆`
-            : `${playerName(room, event.playerId)} 调整牌位`
-  const detail =
-    event.kind === 'claim'
-      ? '正确抢牌 · 正在结算'
-      : event.kind === 'wrong'
-        ? '错误标记 · 目标牌仍留在场上'
-        : event.kind === 'transfer'
-          ? event.automatic
-            ? '超时自动交牌'
-            : '休息阶段交牌'
-          : event.kind === 'discard'
-            ? event.winner
-              ? `放入${playerName(room, event.winner)}的弃牌堆`
-              : '无人收取 · 放入公共弃牌堆'
-            : event.exchangeCardKey
-              ? `第 ${event.sourceSlot + 1} 与第 ${(event.targetSlot || 0) + 1} 个槽位交换`
-              : event.targetSlot === null
-                ? '交换到新的位置'
-                : `放入第 ${event.targetSlot + 1} 个槽位`
-  const tileGroupStyle = exchangeCard ? { display: 'flex', alignItems: 'center', gap: '8px' } : undefined
-
-  return (
-    <div key={event.id} className={`online-battle-animation online-battle-animation-${event.kind}${playerId ? ` player-${playerId}` : ''}`} role="status" aria-live="polite">
-      <div className="online-battle-animation-card">
-        <strong>{title}</strong>
-        <div style={tileGroupStyle}>
-          <OnlineCardTile meta={card} available={false} readOnly result={event.kind === 'claim' || event.kind === 'discard'} wrong={event.kind === 'wrong'} showNumber={false} />
-          {exchangeCard ? (
-            <>
-              <span aria-hidden="true">↔</span>
-              <OnlineCardTile meta={exchangeCard} available={false} readOnly showNumber={false} />
-            </>
-          ) : null}
-        </div>
-        <span>{detail}</span>
-      </div>
-    </div>
-  )
-}
-
-interface SpectatorMatchViewProps {
-  room: OnlineRoomView
-  round: OnlineRoundStart | null
-  lastResult: OnlineRoundResult | null
-  claims: Record<OnlinePlayerId, ClaimState | null>
-  battleAnimation: BattleAnimation | null
-  connected: boolean
-  restRemaining: number
-  roundRemaining: number
-  arrangeRemaining: number
-  battleStyle: BattleStyle
-  onBattleStyle: (style: BattleStyle) => void
-  onLeave: () => void
-  onReconnect: () => void
-  socket: OnlineSocket
-  volume: number
-  onVolumeChange: (volume: number) => void
-  audioButtonLabel: string
-  onUnlockAudio: () => void
-  matchOver: Extract<OnlineServerMessage, { t: 'matchOver' }> | null
-}
-
-const SpectatorMatchView = memo(function SpectatorMatchView({
-  room,
-  round,
-  lastResult,
-  claims,
-  battleAnimation,
-  connected,
-  restRemaining,
-  roundRemaining,
-  arrangeRemaining,
-  battleStyle,
-  onBattleStyle,
-  onLeave,
-  onReconnect,
-  socket,
-  volume,
-  onVolumeChange,
-  audioButtonLabel,
-  onUnlockAudio,
-  matchOver,
-}: SpectatorMatchViewProps) {
-  const topCards = useMemo(() => handCardsForSpectator(room, 'A'), [room])
-  const bottomCards = useMemo(() => handCardsForSpectator(room, 'B'), [room])
-  const phase = room.phase
-  const isPlaying = phase === 'playing'
-  const showBoard = phase === 'arrange' || isPlaying || phase === 'over'
-  const isResting = isPlaying && !round && restRemaining > 0 && !matchOver
-  const seconds = phase === 'arrange' ? Math.ceil(arrangeRemaining / 1000) : round ? Math.ceil(roundRemaining / 1000) : isResting ? Math.ceil(restRemaining / 1000) : 0
-  const stage = phase === 'arrange' ? '开局排牌' : round ? '听歌抢牌' : isResting ? '休息阶段' : phase === 'playing' ? '等待下一回合' : phase === 'over' || matchOver ? '对局结束' : '对局准备中'
-  const resultMeta = lastResult?.cardKey ? room.cards.find((card) => card.key === lastResult.cardKey) || null : null
-  const resultWinner = lastResult?.winner || null
-  const resultTitle = lastResult
-    ? lastResult.reason === 'wrong'
-      ? '选错处理完成，目标牌仍在场上'
-      : resultWinner
-        ? `${playerName(room, resultWinner)} 取到了牌`
-        : '本回合无人取牌'
-    : null
-
-  return (
-    <div className={`online-page online-match-page online-spectator-page online-style-${battleStyle}`}>
-      <section className="hero">
-        <div className="row spread">
-          <div>
-            <h1>观战 · {room.name}</h1>
-            <p>{room.deckName} · 房间码 <span className="room-code">{room.code}</span></p>
-          </div>
-          <div className="online-spectator-actions">
-            <span className={`connection-chip${connected ? ' online' : ''}`}>{connected ? '观战连接稳定' : '正在重连…'}</span>
-            <button className="btn btn-secondary" type="button" onClick={onLeave}>退出观战</button>
-          </div>
-        </div>
-      </section>
-
-      <section className="panel stack online-game-panel online-spectator-panel">
-        <div className="online-game-header">
-          <div className="online-game-heading">
-            <strong>歌牌对战 · 观战视角</strong>
-            <span className="muted small">只读模式 · 双方操作、取错标记与交牌动画都会同步显示</span>
-          </div>
-          <div className="online-game-header-tools">
-            <span className="chip">{room.players.A?.connected && room.players.B?.connected ? '双方在线' : '有玩家断线'}</span>
-            {!connected ? <button className="btn btn-secondary online-reconnect-button" type="button" onClick={onReconnect}>立即重连</button> : null}
-            <div className="online-style-switch" role="group" aria-label="观战视图">
-              <span className="online-style-caption">视图</span>
-              <button className={`online-style-button${battleStyle === 'text' ? ' active' : ''}`} type="button" aria-pressed={battleStyle === 'text'} onClick={() => onBattleStyle('text')}>文字注重</button>
-              <button className={`online-style-button${battleStyle === 'card' ? ' active' : ''}`} type="button" aria-pressed={battleStyle === 'card'} onClick={() => onBattleStyle('card')}>卡面注重</button>
-            </div>
-          </div>
-        </div>
-
-        <div className="online-spectator-scoreboard" aria-label="双方剩余牌数">
-          <div className="online-spectator-player player-a">
-            <span>{playerName(room, 'A')}</span>
-            <strong>{room.players.A?.handCardKeys.length || 0}</strong>
-            <small>张牌 · 上方</small>
-          </div>
-          <div className={`online-spectator-stage${isResting ? ' resting' : ''}`} role="status" aria-live="polite">
-            <span>{stage}</span>
-            <strong>{seconds ? `${seconds}s` : '—'}</strong>
-            <small>{room.remainingCardKeys.length} 张场上牌</small>
-          </div>
-          <div className="online-spectator-player player-b">
-            <span>{playerName(room, 'B')}</span>
-            <strong>{room.players.B?.handCardKeys.length || 0}</strong>
-            <small>张牌 · 下方</small>
-          </div>
-        </div>
-
-        {!showBoard ? (
-          <div className="online-spectator-waiting" role="status">
-            <strong>{stage}</strong>
-            <span>观战画面会在对局开始后显示双方的完整牌区。</span>
-            <div className="online-spectator-progress">
-              <span>A：{room.draft.selectedCount}/30 已选 · {room.draft.bannedCount}/5 BAN</span>
-              <span>B：{room.draft.opponentSelectedCount}/30 已选 · {room.draft.opponentBannedCount}/5 BAN</span>
-            </div>
-          </div>
-        ) : (
-          <div className="online-spectator-board">
-            <HandArea
-              title={`${playerName(room, 'A')} · 上方牌区 · ${room.players.A?.handCardKeys.length || 0}/33`}
-              slotCards={topCards}
-              spectator
-              playerId="A"
-              wrongKey={claims.A?.correct === false ? claims.A.cardKey : null}
-              pickedKey={claims.A?.cardKey || null}
-            />
-            <div className="online-board-divider online-spectator-divider" aria-hidden="true">
-              <span />
-              <div className="online-divider-scores">
-                <div><strong>{room.players.A?.score || 0}</strong><span>{playerName(room, 'A')}</span></div>
-                <strong className="versus-mark">VS</strong>
-                <div><span>{playerName(room, 'B')}</span><strong>{room.players.B?.score || 0}</strong></div>
-              </div>
-              <div className="online-match-status"><strong>{stage}</strong><span>{seconds ? `${seconds} 秒` : '等待服务器结算'}</span></div>
-              <span />
-            </div>
-            <HandArea
-              title={`${playerName(room, 'B')} · 下方牌区 · ${room.players.B?.handCardKeys.length || 0}/33`}
-              slotCards={bottomCards}
-              spectator
-              playerId="B"
-              wrongKey={claims.B?.correct === false ? claims.B.cardKey : null}
-              pickedKey={claims.B?.cardKey || null}
-            />
-          </div>
-        )}
-
-        <aside className="online-spectator-sidebar" aria-label="观战信息">
-          <section className="online-sidebar-card online-count-panel online-spectator-count-panel">
-            <strong>剩余牌数</strong>
-            <span className="player-a-count">{playerName(room, 'A')} <b>{room.players.A?.handCardKeys.length || 0}</b></span>
-            <span className="player-b-count">{playerName(room, 'B')} <b>{room.players.B?.handCardKeys.length || 0}</b></span>
-            <span>场上实体牌 <b>{room.remainingCardKeys.length}</b></span>
-          </section>
-          <NetworkFairness socket={socket} you={null} compact />
-          <div className="online-audio-control">
-            <OnlineVolumeControl volume={volume} onChange={onVolumeChange} />
-            <button className="btn btn-secondary online-audio-button" type="button" onClick={onUnlockAudio}>{audioButtonLabel}</button>
-          </div>
-        </aside>
-      </section>
-
-      {battleAnimation ? <BattleAnimationOverlay event={battleAnimation} room={room} /> : null}
-      {lastResult && !matchOver ? (
-        <div className="online-result-overlay" aria-live="polite">
-          <section key={`spectator-result-${lastResult.roundNo}`} className="panel cool online-result online-modal-card" role="status">
-            <div className="row spread">
-              <strong>{resultTitle}</strong>
-              <span className="muted small">{lastResult.reason === 'timeout' ? '时间到' : lastResult.reason === 'wrong' ? '选错' : '本回合结算'}</span>
-            </div>
-            {resultMeta ? (
-              <div className="online-result-body">
-                <div className={`online-discard-flight${resultWinner ? ` winner-${resultWinner}` : ''}`}>
-                  <OnlineCardTile meta={resultMeta} available result readOnly showNumber={false} />
-                  <span className="online-discard-pile">{resultWinner ? `${playerName(room, resultWinner)} 的弃牌堆` : '场上'}</span>
-                </div>
-                <div className="stack">
-                  <span className="muted small">对应歌曲</span>
-                  <strong>{lastResult.song.displayName}</strong>
-                  <span className="muted small">观战者不能操作牌面。</span>
-                </div>
-              </div>
-            ) : null}
-          </section>
-        </div>
-      ) : null}
-      {matchOver ? (
-        <div className="online-spectator-over" role="status">
-          <strong>{matchOver.winner ? `${playerName(room, matchOver.winner)} 获胜` : '双方平手'}</strong>
-          <span>对局已结束 · {matchOver.rounds} 回合</span>
-        </div>
-      ) : null}
-    </div>
-  )
-})
-
-function OnlineVolumeControl({ volume, onChange }: { volume: number; onChange: (volume: number) => void }) {
-  const percentage = Math.round(clampOnlineVolume(volume) * 100)
-  return (
-    <label className="online-volume-control">
-      <span>对局音量 <strong>{percentage}%</strong></span>
-      <input
-        type="range"
-        min="0"
-        max="100"
-        step="1"
-        value={percentage}
-        aria-label="对局音量"
-        onChange={(event) => onChange(Number(event.currentTarget.value) / 100)}
-      />
-    </label>
-  )
-}
-
-interface VirtualServerCardGridProps {
-  cards: ServerPackageCatalogCard[]
-  packageId: string
-  selected: Set<string>
-  onToggle: (cardKey: string) => void
-}
-
-const VirtualServerCard = memo(function VirtualServerCard({
-  meta,
-  selected,
-  onToggle,
-}: {
-  meta: OnlineCardView
-  selected: boolean
-  onToggle: (cardKey: string) => void
-}) {
-  const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
-  return <OnlineCardTile meta={meta} card={null} available picked={selected} thumbnail onClick={handleClick} />
-})
-
-/**
- * Keeps the complete server catalog scrollable while mounting only the rows
- * around the viewport. This avoids a 400+ card React/DOM task without hiding
- * cards behind a manual "load more" action.
- */
-function VirtualServerCardGrid({ cards, packageId, selected, onToggle }: VirtualServerCardGridProps) {
-  const viewportRef = useRef<HTMLDivElement | null>(null)
-  const scrollTopRef = useRef(0)
-  const scrollFrameRef = useRef<number | null>(null)
-  const [viewport, setViewport] = useState({ width: 0, height: 520 })
-  const [scrollTop, setScrollTop] = useState(0)
-  const cardViews = useMemo(() => cards.map((card) => packageCardMeta(card, packageId)), [cards, packageId])
-
-  useEffect(() => {
-    const element = viewportRef.current
-    if (!element) return
-    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight || 520 })
-    update()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(update)
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
-    }
-  }, [])
-
-  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    scrollTopRef.current = event.currentTarget.scrollTop
-    if (scrollFrameRef.current !== null) return
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null
-      setScrollTop(scrollTopRef.current)
-    })
-  }, [])
-
-  const columns = viewport.width >= 720 ? 5 : viewport.width >= 480 ? 4 : viewport.width >= 320 ? 3 : 2
-  const cardWidth = Math.max(92, (viewport.width - (columns - 1) * 8 - 6) / columns)
-  const rowHeight = Math.ceil(cardWidth * 1.45 + 58)
-  const rowCount = Math.ceil(cards.length / columns)
-  const firstRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
-  const lastRow = Math.min(rowCount, Math.ceil((scrollTop + viewport.height) / rowHeight) + 2)
-  const startIndex = firstRow * columns
-  const renderedCards = cardViews.slice(startIndex, lastRow * columns)
-
-  return (
-    <div
-      className="online-select-viewport"
-      ref={viewportRef}
-      onScroll={handleScroll}
-      aria-label={`服务器牌组，共 ${cards.length} 张卡面`}
-    >
-      <div className="online-select-canvas" style={{ height: `${rowCount * rowHeight}px` }}>
-        <div
-          className="online-select-window"
-          style={{
-            top: `${firstRow * rowHeight}px`,
-            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-            gridAutoRows: `${rowHeight}px`,
-          }}
-        >
-          {renderedCards.map((meta) => (
-            <VirtualServerCard key={meta.key} meta={meta} selected={selected.has(meta.key)} onToggle={onToggle} />
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-const DraftCard = memo(function DraftCard({
-  meta,
-  selected,
-  onToggle,
-}: {
-  meta: OnlineCardView
-  selected: boolean
-  onToggle: (cardKey: string) => void
-}) {
-  const handleClick = useCallback(() => onToggle(meta.key), [meta.key, onToggle])
-  return <OnlineCardTile meta={meta} available picked={selected} thumbnail onClick={handleClick} />
-})
-
-interface DraftCardPickerProps {
-  title: string
-  description: string
-  cards: OnlineCardView[]
-  selected: Set<string>
-  limit: number
-  opponentCount: number
-  opponentLabel: string
-  submitLabel: string
-  onToggle: (key: string) => void
-  onSubmit: () => void
-}
-
-function DraftCardPicker({
-  title,
-  description,
-  cards,
-  selected,
-  limit,
-  opponentCount,
-  opponentLabel,
-  submitLabel,
-  onToggle,
-  onSubmit,
-}: DraftCardPickerProps) {
-  return (
-    <section className="panel stack draft-panel">
-      <div className="row spread">
-        <div>
-          <h2>{title}</h2>
-          <p className="muted small">{description}</p>
-        </div>
-        <span className="chip">{selected.size} / {limit}</span>
-      </div>
-      <div className="draft-progress">
-        <span>你的选择：{selected.size} / {limit}</span>
-        <span>{opponentLabel}：{opponentCount} / {limit}</span>
-      </div>
-      <div className="draft-card-grid">
-        {cards.map((meta) => (
-          <DraftCard key={meta.key} meta={meta} selected={selected.has(meta.key)} onToggle={onToggle} />
-        ))}
-      </div>
-      {!cards.length ? <div className="empty-state">正在等待服务器下发本阶段牌池…</div> : null}
-      <button className="btn btn-primary btn-lg" type="button" disabled={selected.size !== limit} onClick={onSubmit}>
-        {submitLabel}
-      </button>
-    </section>
-  )
-}
-
-interface HandAreaProps {
-  title: string
-  slotCards: Array<OnlineCardView | null>
-  playerId?: OnlinePlayerId
-  mine?: boolean
-  spectator?: boolean
-  canArrange?: boolean
-  pinMode?: boolean
-  pinnedKeys?: Set<string>
-  draggingKey?: string | null
-  dragOverSlot?: number | null
-  claimable?: boolean
-  giving?: boolean
-  resultKey?: string | null
-  wrongKey?: string | null
-  pickedKey?: string | null
-  onCardClick?: (key: string) => void
-  onSlotClick?: (slotIndex: number) => void
-  onDragStart?: (event: DragEvent<HTMLButtonElement>, cardKey: string) => void
-  onDragOver?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
-  onDrop?: (event: DragEvent<HTMLButtonElement>, slotIndex: number) => void
-  onDragEnd?: () => void
-  onPointerDown?: (event: PointerEvent<HTMLButtonElement>, cardKey: string) => void
-  onPointerMove?: (event: PointerEvent<HTMLButtonElement>) => void
-  onPointerUp?: (event: PointerEvent<HTMLButtonElement>) => void
-  onPointerCancel?: (event: PointerEvent<HTMLButtonElement>) => void
-}
-
-const HandArea = memo(function HandArea({
-  title,
-  slotCards,
-  playerId,
-  mine = false,
-  spectator = false,
-  canArrange = false,
-  pinMode = false,
-  pinnedKeys = new Set<string>(),
-  draggingKey = null,
-  dragOverSlot = null,
-  claimable = false,
-  giving = false,
-  resultKey = null,
-  wrongKey = null,
-  pickedKey = null,
-  onCardClick,
-  onSlotClick,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
-  onPointerCancel,
-}: HandAreaProps) {
-  const draggable = mine && canArrange && !spectator
-  const clickable = Boolean(!spectator && ((claimable && !canArrange) || giving || (mine && canArrange)))
-  const showSlots = Boolean(mine && draggingKey)
-  const suppressArrangeClickRef = useRef(false)
-  const handleCardClick = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
-      if (suppressArrangeClickRef.current) {
-        suppressArrangeClickRef.current = false
-        return
-      }
-      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
-      if (mine && canArrange && draggingKey && onSlotClick && Number.isInteger(slotIndex)) {
-        onSlotClick(slotIndex)
-        return
-      }
-      const cardKey = event.currentTarget.dataset.onlineCardKey
-      if (cardKey) onCardClick?.(cardKey)
-    },
-    [canArrange, draggingKey, mine, onCardClick, onSlotClick],
-  )
-  const handleSlotClick = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) => {
-      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
-      if (Number.isInteger(slotIndex)) onSlotClick?.(slotIndex)
-    },
-    [onSlotClick],
-  )
-  const handleCardDragStart = useCallback(
-    (event: DragEvent<HTMLButtonElement>) => {
-      const cardKey = event.currentTarget.dataset.onlineCardKey
-      if (cardKey) onDragStart?.(event, cardKey)
-    },
-    [onDragStart],
-  )
-  const handleSlotDragOver = useCallback(
-    (event: DragEvent<HTMLButtonElement>) => {
-      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
-      if (Number.isInteger(slotIndex)) onDragOver?.(event, slotIndex)
-    },
-    [onDragOver],
-  )
-  const handleSlotDrop = useCallback(
-    (event: DragEvent<HTMLButtonElement>) => {
-      const slotIndex = Number.parseInt(event.currentTarget.dataset.onlineSlotIndex || '', 10)
-      if (Number.isInteger(slotIndex)) onDrop?.(event, slotIndex)
-    },
-    [onDrop],
-  )
-  const handleCardPointerDown = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      suppressArrangeClickRef.current = false
-      const cardKey = event.currentTarget.dataset.onlineCardKey
-      if (cardKey) onPointerDown?.(event, cardKey)
-    },
-    [onPointerDown],
-  )
-  const handleCardPointerUp = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (canArrange && event.pointerType !== 'touch') suppressArrangeClickRef.current = true
-      onPointerUp?.(event)
-    },
-    [canArrange, onPointerUp],
-  )
-  const handleCardPointerCancel = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      if (canArrange && event.pointerType !== 'touch') suppressArrangeClickRef.current = true
-      onPointerCancel?.(event)
-    },
-    [canArrange, onPointerCancel],
-  )
-  return (
-    <section className={`hand-area${mine ? ' mine' : ''}${playerId ? ` player-${playerId.toLowerCase()}` : ''}${giving ? ' giving' : ''}${spectator ? ' spectator' : ''}`}>
-      <div className="row spread hand-area-heading">
-        <strong>{title}</strong>
-        <span className="muted small">{spectator ? '观战中 · 只读' : giving ? '点击自己的牌交给对手' : mine ? (canArrange ? (pinMode ? '点击固定牌位' : draggingKey ? '点击槽位放置选中的牌' : '点击牌再点击槽位，或拖动调整') : '你的牌区') : '点击卡面抢牌'}</span>
-      </div>
-      <div className="hand-grid-scroll">
-        <div className="online-hand-grid">
-          {Array.from({ length: MAX_HAND_SLOTS }, (_, index) => {
-            const meta = slotCards[index] || null
-            if (!meta) {
-              return showSlots ? (
-                <button
-                  key={`empty-${index}`}
-                  className="online-empty-slot visible"
-                  type="button"
-                  data-online-slot-index={index}
-                  onDragOver={onDragOver ? handleSlotDragOver : undefined}
-                  onDrop={onDrop ? handleSlotDrop : undefined}
-                  onClick={onSlotClick ? handleSlotClick : undefined}
-                  aria-label={`放置到第 ${index + 1} 个牌槽`}
-                >
-                  <span>放置到此槽位</span>
-                </button>
-              ) : (
-                <span key={`empty-${index}`} className="online-slot-placeholder" data-online-slot-index={index} aria-hidden="true" />
-              )
-            }
-            return (
-              <OnlineCardTile
-                key={meta.key}
-                meta={meta}
-                available={clickable}
-                showNumber={false}
-                slotIndex={index}
-                picked={pickedKey === meta.key}
-                result={resultKey === meta.key}
-                wrong={wrongKey === meta.key}
-                readOnly={spectator}
-                pinned={pinnedKeys.has(meta.key)}
-                stateLabel={giving ? '点击交牌' : canArrange ? (draggingKey === meta.key ? '已选中' : '点击换位') : undefined}
-                draggable={draggable}
-                dragging={draggingKey === meta.key}
-                dropTarget={dragOverSlot === index && draggingKey !== meta.key}
-                onDragStart={onDragStart ? handleCardDragStart : undefined}
-                onDragOver={onDragOver ? handleSlotDragOver : undefined}
-                onDrop={onDrop ? handleSlotDrop : undefined}
-                onDragEnd={onDragEnd}
-                onPointerDown={onPointerDown ? handleCardPointerDown : undefined}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp ? handleCardPointerUp : undefined}
-                onPointerCancel={onPointerCancel ? handleCardPointerCancel : undefined}
-                onClick={clickable && (onCardClick || onSlotClick) ? handleCardClick : undefined}
-              />
-            )
-          })}
-        </div>
-      </div>
-    </section>
-  )
-})
-
-const TransferPanel = memo(function TransferPanel({ room }: { room: OnlineRoomView }) {
-  const pending = room.pendingTransfer
-  if (!pending) return null
-  const isGiver = pending.to === room.you
-  const opponentName = room.players[pending.from]?.nickname || '玩家'
-  const opponentCard = pending.reason === 'opponent_card'
-  return (
-    <section className={`panel transfer-panel${isGiver ? ' choosing' : ''}`} role="alert">
-      <div className="row spread">
-        <strong>{isGiver ? '点击我方牌交给对手' : '等待对手交牌'}</strong>
-        <span className="chip">休息阶段</span>
-      </div>
-      <p className="muted small">
-        {isGiver
-          ? opponentCard
-            ? `你抢到了对手（${opponentName}）牌区中的卡面；请从自己的牌区选择一张牌补给对手。`
-            : `对手（${opponentName}）刚才选错了，请从你自己的牌区点击一张牌转给对手。`
-          : opponentCard
-            ? '目标卡面已从对手牌区移出；等待对手交回一张牌后继续。'
-          : '本回合暂时停止抢牌；对手点击自己的牌后会恢复。超时未选择时系统会自动随机转牌。'}
-      </p>
-    </section>
-  )
-})
-
-function PlayerBadge({ player, mine }: { player: OnlineRoomView['players']['A']; mine: boolean }) {
-  return (
-    <div className="player-badge">
-      <span className={`presence-dot${player?.connected ? ' connected' : ''}`} />
-      <strong>{player?.nickname || '等待对手加入…'}</strong>
-      {mine ? <span className="muted small">（你）</span> : null}
-      {player?.ready ? <span className="ready-label">已准备</span> : null}
-    </div>
-  )
-}
-
-function useOnlineNetworkSnapshot(socket: OnlineSocket) {
-  return useSyncExternalStore(socket.subscribeNetwork, socket.getNetworkSnapshot, socket.getNetworkSnapshot)
-}
-
-const OnlineLobbyReadyButton = memo(function OnlineLobbyReadyButton({
-  socket,
-  room,
-  opponent,
-  ready,
-}: {
-  socket: OnlineSocket
-  room: OnlineRoomView
-  opponent: OnlineRoomView['players']['A']
-  ready: boolean
-}) {
-  const network = useOnlineNetworkSnapshot(socket)
-  return (
-    <button
-      className="btn btn-primary btn-lg"
-      type="button"
-      disabled={!opponent || !(network?.fairness.canStart ?? room.fairness.canStart)}
-      onClick={() => socket.send({ t: 'ready', ready: !ready })}
-    >
-      {ready ? '取消准备' : '准备开始'}
-    </button>
-  )
-})
-
-const NetworkFairness = memo(function NetworkFairness({ socket, you, compact = false }: { socket: OnlineSocket; you: OnlineRoomView['you']; compact?: boolean }) {
-  const network = useOnlineNetworkSnapshot(socket)
-  if (!network) return null
-  const { fairness, players } = network
-  if (compact) {
-    if (!you) {
-      return (
-        <div className="network-fairness compact network-latency" role="status" aria-label="双方延迟">
-          <strong>双方延迟</strong>
-          <div className="network-metrics">
-            <span>A {formatNetworkMetric(players.A.rttMs)}</span>
-            <span>B {formatNetworkMetric(players.B.rttMs)}</span>
-          </div>
-        </div>
-      )
-    }
-    const own = players[you]
-    const opponent = players[otherPlayer(you)]
-    return (
-      <div className="network-fairness compact network-latency" role="status" aria-label="双方延迟">
-        <strong>双方延迟</strong>
-        <div className="network-metrics">
-          <span>我方 {formatNetworkMetric(own.rttMs)}</span>
-          <span>对手 {formatNetworkMetric(opponent.rttMs)}</span>
-        </div>
-      </div>
-    )
-  }
-  const statusLabel = fairness.status === 'ready' ? '可开始' : fairness.status === 'unfair' ? '不适合公平对战' : '测量中'
-  const metric = (player: OnlineNetworkView) => {
-    return `RTT ${formatNetworkMetric(player.rttMs)} · 抖动 ${formatNetworkMetric(player.jitterMs)} · ${player.samples} 次`
-  }
-
-  return (
-    <div className={`network-fairness ${fairness.status}`} role={fairness.status === 'unfair' ? 'alert' : 'status'}>
-      <div className="row spread">
-        <strong>网络公平性</strong>
-        <span>{statusLabel}</span>
-      </div>
-      <p>{fairness.message}</p>
-      <div className="network-metrics">
-        <span>A · {metric(players.A)}</span>
-        <span>B · {metric(players.B)}</span>
-      </div>
-    </div>
-  )
-})
-
-function ScoreCard({
-  player,
-  score,
-  winner,
-  mine = false,
-}: {
-  player: OnlineRoomView['players']['A']
-  score: number
-  winner: boolean
-  mine?: boolean
-}) {
-  return (
-    <div className={`score-card${winner ? ' winner' : ''}`}>
-      <span className="muted small">{mine ? '你' : '对手'}</span>
-      <strong>{player?.nickname || '—'}</strong>
-      <span className="score-value">{score}</span>
     </div>
   )
 }

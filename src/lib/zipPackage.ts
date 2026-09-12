@@ -1,6 +1,7 @@
 import JSZip from 'jszip'
 import type { CardEntry, DeckRecord, PackageMode, SongEntry } from '../types/models'
 import { cardsToCsv, csvRowsToCards, parseCsv, withBom } from './csv'
+import { createThumbnailBlob, thumbnailBlobKey } from './imagePreview'
 import { createId, deleteBlobs, getBlob, putBlob, saveDeck } from './storage'
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'])
@@ -152,6 +153,18 @@ export async function importDeckZip(
       await putBlob(key, blob, blob.type || mimeForExtension(resource.ext))
       storedBlobKeys.push(key)
       blobKeysByPath.set(normalizePath(resource.path), key)
+      if (IMAGE_EXTS.has(resource.ext)) {
+        try {
+          const thumb = await createThumbnailBlob(blob)
+          if (thumb !== blob) {
+            const thumbKey = thumbnailBlobKey(key)
+            await putBlob(thumbKey, thumb, thumb.type || 'image/webp')
+            storedBlobKeys.push(thumbKey)
+          }
+        } catch {
+          // Cover import still succeeds; the first select-page view will generate a thumb.
+        }
+      }
       onProgress?.({
         stage: 'resources',
         current: index + 1,

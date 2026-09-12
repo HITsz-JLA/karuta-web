@@ -15,6 +15,7 @@ export interface OnlinePlayerView {
   nickname: string
   connected: boolean
   audioReady: boolean
+  matchAudioReady: boolean
   ready: boolean
   arrangeReady: boolean
   restReady: boolean
@@ -82,6 +83,8 @@ export interface OnlineRoomView {
   restAudioUrl: string | null
   arrangeReadyStartAtServerTime: number | null
   restReadyStartAtServerTime: number | null
+  matchAudioTotal: number
+  waitingMatchAudio: boolean
   roundNo: number
   matchWinner: OnlinePlayerId | null
   fairness: OnlineFairnessView
@@ -117,18 +120,21 @@ export type OnlineClientMessage =
   | { t: 'giveCard'; cardKey: string }
   | { t: 'claim'; roundNo: number; cardKey: string; clientAt: number }
   | { t: 'audioReady'; roundNo: number }
+  | { t: 'matchAudioReady' }
   | { t: 'leaveRoom' }
   | { t: 'ping'; clientAt: number }
 
 export interface OnlineRoundPrepare {
   t: 'roundPrepare'
   roundNo: number
+  playId: number
   audioUrl: string
 }
 
 export interface OnlineRoundStart {
   t: 'roundStart'
   roundNo: number
+  playId: number
   startAtServerTime: number
   windowMs: number
   audioUrl: string
@@ -150,6 +156,7 @@ export type OnlineServerMessage =
   | { t: 'welcome'; resumed: boolean; resumeToken?: string; resumeRejected?: boolean }
   | { t: 'room'; room: OnlineRoomView }
   | { t: 'roomList'; rooms: OnlineRoomSummary[] }
+  | { t: 'matchAudio'; tracks: Array<{ audioUrl: string }>; total: number }
   | OnlineRoundPrepare
   | OnlineRoundStart
   | {

@@ -1,11 +1,17 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import type { DeckMeta, DeckRecord, GameSettings } from '../types/models'
 import { DEFAULT_SETTINGS } from '../types/models'
+import { thumbnailBlobKey } from './imagePreview'
 
 interface KarutaDB extends DBSchema {
   decks: {
     key: string
     value: DeckRecord
+    indexes: { 'by-updated': number }
+  }
+  deckMeta: {
+    key: string
+    value: DeckMeta
     indexes: { 'by-updated': number }
   }
   blobs: {
@@ -21,6 +27,9 @@ interface KarutaDB extends DBSchema {
     value: GameSettings & { id: string }
   }
 }
+
+const DB_NAME = 'karuta-web'
+const DB_VERSION = 2
 
 let dbPromise: Promise<IDBPDatabase<KarutaDB>> | null = null
 let dbInstance: IDBPDatabase<KarutaDB> | null = null
@@ -53,30 +62,80 @@ async function withDbRetry<T>(operation: (db: IDBPDatabase<KarutaDB>) => Promise
   throw new Error('IndexedDB 操作失败')
 }
 
+export function collectDeckBlobKeys(deck: DeckRecord): string[] {
+  const keys = new Set<string>()
+  for (const card of deck.cards) {
+    if (card.imageBlobKey) {
+      keys.add(card.imageBlobKey)
+      keys.add(thumbnailBlobKey(card.imageBlobKey))
+    }
+    for (const song of card.songs) {
+      keys.add(song.blobKey)
+      if (song.fullBlobKey) keys.add(song.fullBlobKey)
+    }
+  }
+  return [...keys]
+}
+
+export function toDeckMeta(deck: DeckRecord): DeckMeta {
+  return {
+    id: deck.id,
+    name: deck.name,
+    updatedAt: deck.updatedAt,
+    cardCount: deck.cards.length,
+    songCount: deck.cards.reduce((sum, card) => sum + card.songs.length, 0),
+    blobKeys: collectDeckBlobKeys(deck),
+    ...(deck.sourcePackageId ? { sourcePackageId: deck.sourcePackageId } : {}),
+  }
+}
+
 function getDb() {
   if (!dbPromise) {
     let opening: Promise<IDBPDatabase<KarutaDB>> | undefined
-    opening = openDB<KarutaDB>('karuta-web', 1, {
-      upgrade(db) {
-        const decks = db.createObjectStore('decks', { keyPath: 'id' })
-        decks.createIndex('by-updated', 'updatedAt')
-        db.createObjectStore('blobs', { keyPath: 'key' })
-        db.createObjectStore('settings', { keyPath: 'id' })
+    let ready: Promise<IDBPDatabase<KarutaDB>> | undefined
+    let needsDeckMetaBackfill = false
+    opening = openDB<KarutaDB>(DB_NAME, DB_VERSION, {
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          const decks = db.createObjectStore('decks', { keyPath: 'id' })
+          decks.createIndex('by-updated', 'updatedAt')
+          db.createObjectStore('blobs', { keyPath: 'key' })
+          db.createObjectStore('settings', { keyPath: 'id' })
+        }
+        if (oldVersion < 2) {
+          const meta = db.createObjectStore('deckMeta', { keyPath: 'id' })
+          meta.createIndex('by-updated', 'updatedAt')
+          needsDeckMetaBackfill = oldVersion >= 1
+        }
       },
       blocking() {
-        if (opening) resetDb(opening)
+        if (ready) resetDb(ready)
       },
       terminated() {
-        if (opening) resetDb(opening)
+        if (ready) resetDb(ready)
       },
     })
-    dbPromise = opening
-    void opening
-      .then((db) => {
-        if (dbPromise === opening) dbInstance = db
-      })
+    ready = opening.then(async (db) => {
+      dbInstance = db
+      // Never await IDB reads/writes from the versionchange callback. A
+      // versionchange transaction can become inactive between awaits, which
+      // made existing v1 databases fail before the editor could open them.
+      if (needsDeckMetaBackfill) {
+        const decks = await db.getAll('decks')
+        const existingMetaKeys = new Set(await db.getAllKeys('deckMeta'))
+        const missing = decks.filter((deck) => !existingMetaKeys.has(deck.id))
+        if (missing.length) {
+          const tx = db.transaction('deckMeta', 'readwrite')
+          for (const deck of missing) tx.store.put(toDeckMeta(deck))
+          await tx.done
+        }
+      }
+      return db
+    })
+    dbPromise = ready
+    void ready
       .catch(() => {
-        if (dbPromise === opening) resetDb(opening)
+        if (dbPromise === ready) resetDb(ready)
       })
   }
   return dbPromise
@@ -89,17 +148,19 @@ export function createId(prefix = 'id') {
 }
 
 export async function listDeckMeta(): Promise<DeckMeta[]> {
-  const decks = await withDbRetry((db) => db.getAllFromIndex('decks', 'by-updated'))
-  return decks
-    .map((deck) => ({
-      id: deck.id,
-      name: deck.name,
-      updatedAt: deck.updatedAt,
-      cardCount: deck.cards.length,
-      songCount: deck.cards.reduce((sum, card) => sum + card.songs.length, 0),
-      ...(deck.sourcePackageId ? { sourcePackageId: deck.sourcePackageId } : {}),
-    }))
-    .reverse()
+  return withDbRetry(async (db) => {
+    let metas = await db.getAllFromIndex('deckMeta', 'by-updated')
+    if (!metas.length) {
+      const decks = await db.getAllFromIndex('decks', 'by-updated')
+      if (decks.length) {
+        metas = decks.map((deck) => toDeckMeta(deck))
+        const tx = db.transaction('deckMeta', 'readwrite')
+        await Promise.all(metas.map((meta) => tx.store.put(meta)))
+        await tx.done
+      }
+    }
+    return metas.sort((left, right) => right.updatedAt - left.updatedAt)
+  })
 }
 
 export async function getDeck(id: string): Promise<DeckRecord | undefined> {
@@ -115,40 +176,34 @@ export async function saveDeck(deck: DeckRecord): Promise<void> {
       number: Number.isFinite(card.number) && card.number > 0 ? card.number : index + 1,
     })),
   }
-  await withDbRetry((db) => db.put('decks', numbered))
+  await withDbRetry(async (db) => {
+    const tx = db.transaction(['decks', 'deckMeta'], 'readwrite')
+    await tx.objectStore('decks').put(numbered)
+    await tx.objectStore('deckMeta').put(toDeckMeta(numbered))
+    await tx.done
+  })
 }
 
 export async function deleteDeck(id: string, deleteOrphanBlobs = true): Promise<void> {
   await withDbRetry(async (db) => {
-    const deck = await db.get('decks', id)
-    await db.delete('decks', id)
+    const [deck, meta] = await Promise.all([db.get('decks', id), db.get('deckMeta', id)])
+    const ownedKeys = meta?.blobKeys?.length ? meta.blobKeys : deck ? collectDeckBlobKeys(deck) : []
 
-    if (!deleteOrphanBlobs || !deck) return
+    const tx = db.transaction(['decks', 'deckMeta', 'blobs'], 'readwrite')
+    await tx.objectStore('decks').delete(id)
+    await tx.objectStore('deckMeta').delete(id)
 
-    const usedKeys = new Set<string>()
-    for (const other of await db.getAll('decks')) {
-      for (const card of other.cards) {
-        if (card.imageBlobKey) usedKeys.add(card.imageBlobKey)
-        for (const song of card.songs) {
-          usedKeys.add(song.blobKey)
-          if (song.fullBlobKey) usedKeys.add(song.fullBlobKey)
-        }
+    if (deleteOrphanBlobs && ownedKeys.length) {
+      const others = await tx.objectStore('deckMeta').getAll()
+      const usedKeys = new Set<string>()
+      for (const other of others) {
+        for (const key of other.blobKeys || []) usedKeys.add(key)
       }
+      const blobStore = tx.objectStore('blobs')
+      await Promise.all(ownedKeys.filter((key) => !usedKeys.has(key)).map((key) => blobStore.delete(key)))
     }
 
-    for (const card of deck.cards) {
-      if (card.imageBlobKey && !usedKeys.has(card.imageBlobKey)) {
-        await db.delete('blobs', card.imageBlobKey)
-      }
-      for (const song of card.songs) {
-        if (!usedKeys.has(song.blobKey)) {
-          await db.delete('blobs', song.blobKey)
-        }
-        if (song.fullBlobKey && !usedKeys.has(song.fullBlobKey)) {
-          await db.delete('blobs', song.fullBlobKey)
-        }
-      }
-    }
+    await tx.done
   })
 }
 

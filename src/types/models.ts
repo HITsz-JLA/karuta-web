@@ -46,6 +46,8 @@ export interface DeckMeta {
   songCount: number
   /** Server package filename this local deck was imported from, when known. */
   sourcePackageId?: string
+  /** Image/audio/thumbnail blob keys owned by this deck, used for orphan cleanup. */
+  blobKeys: string[]
 }
 
 export interface DeckRecord {

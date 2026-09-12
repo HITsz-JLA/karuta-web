@@ -70,6 +70,7 @@ export function GamePage() {
       case 'IDLE':
         return '点击「准备」开始回合'
       case 'CARD_SELECTED':
+        return '正在加载音频…'
       case 'MUSIC_PLAYING':
         return '播放中，可随时判定'
       case 'WAITING_RESULT':
@@ -89,7 +90,6 @@ export function GamePage() {
     snap &&
     (snap.roundState === 'MUSIC_PLAYING' ||
       snap.roundState === 'WAITING_RESULT' ||
-      snap.roundState === 'CARD_SELECTED' ||
       snap.roundState === 'EMPTY_CARD')
 
   const canPrepare =

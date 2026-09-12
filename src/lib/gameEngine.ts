@@ -219,7 +219,6 @@ export class GameEngine {
     }
 
     this.playbackDuration = Math.min(this.randomDuration(), MAX_PLAYBACK_SECONDS)
-    this.roundState = 'MUSIC_PLAYING'
     this.emit()
 
     this.audio.setOnEnded(() => {
@@ -230,6 +229,11 @@ export class GameEngine {
 
     try {
       await this.audio.playSong(this.currentSong, this.volume, this.playbackDuration)
+      if (session !== this.playSession) return
+      if (this.roundState === 'CARD_SELECTED') {
+        this.roundState = 'MUSIC_PLAYING'
+        this.emit()
+      }
     } catch (error) {
       if (session !== this.playSession) return
       this.error = error instanceof Error ? error.message : '播放失败'
@@ -242,7 +246,6 @@ export class GameEngine {
     if (
       this.roundState !== 'MUSIC_PLAYING' &&
       this.roundState !== 'WAITING_RESULT' &&
-      this.roundState !== 'CARD_SELECTED' &&
       this.roundState !== 'EMPTY_CARD'
     ) {
       return

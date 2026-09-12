@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent, type PointerEvent } from 'react'
+import { observeNearViewport } from '../hooks/useNearViewportImage'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createThumbnailObjectUrl, enqueueImageLoad } from '../lib/imagePreview'
 import type { CardEntry } from '../types/models'
@@ -36,36 +37,6 @@ const CARD_IMAGE_MEMORY_LIMIT = 96
 const cachedImageUrls = new Map<string, string>()
 const pendingImageLoads = new Map<string, Promise<string>>()
 let imageCachePromise: Promise<Cache> | null = null
-const imageObservers = new Map<Element | null, IntersectionObserver>()
-const observedImageTargets = new Map<Element, () => void>()
-
-function observeImageTarget(element: HTMLButtonElement, onVisible: () => void, root: Element | null) {
-  if (typeof IntersectionObserver === 'undefined') return undefined
-  let observer = imageObservers.get(root)
-  if (!observer) {
-    observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue
-          const callback = observedImageTargets.get(entry.target)
-          if (!callback) continue
-          observedImageTargets.delete(entry.target)
-          observer?.unobserve(entry.target)
-          callback()
-        }
-      },
-      { root: root as Element | null, rootMargin: '240px' },
-    )
-    imageObservers.set(root, observer)
-  }
-  observedImageTargets.set(element, onVisible)
-  observer.observe(element)
-  return () => {
-    if (observedImageTargets.get(element) !== onVisible) return
-    observedImageTargets.delete(element)
-    observer?.unobserve(element)
-  }
-}
 
 async function openImageCache() {
   if (typeof caches === 'undefined') return null
@@ -194,7 +165,7 @@ function useCachedImageUrl(
 
     setShouldLoad(false)
     const root = target.closest('.online-select-viewport, .draft-card-grid')
-    return observeImageTarget(target, () => setShouldLoad(true), root)
+    return observeNearViewport(target, () => setShouldLoad(true), root)
   }, [imageUrl, thumbnail])
 
   useEffect(() => {

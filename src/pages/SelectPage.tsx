@@ -28,10 +28,11 @@ interface LocalCardGridProps {
   cards: CardEntry[]
   selectedIds: Set<string>
   onToggle: (cardId: string) => void
+  resetKey: string
 }
 
 /** Keeps the complete local deck scrollable while mounting only nearby rows. */
-function LocalCardGrid({ cards, selectedIds, onToggle }: LocalCardGridProps) {
+function LocalCardGrid({ cards, selectedIds, onToggle, resetKey }: LocalCardGridProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const scrollTopRef = useRef(0)
   const scrollFrameRef = useRef<number | null>(null)
@@ -65,7 +66,7 @@ function LocalCardGrid({ cards, selectedIds, onToggle }: LocalCardGridProps) {
       viewportRef.current.scrollTop = 0
     }
     setScrollTop((previous) => (previous === 0 ? previous : 0))
-  }, [cards])
+  }, [resetKey])
 
   const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     scrollTopRef.current = event.currentTarget.scrollTop
@@ -322,7 +323,12 @@ export function SelectPage() {
       </section>
 
       <section style={{ marginTop: 16 }}>
-        <LocalCardGrid cards={visibleCards} selectedIds={selectedIds} onToggle={toggleCard} />
+        <LocalCardGrid
+          cards={visibleCards}
+          selectedIds={selectedIds}
+          onToggle={toggleCard}
+          resetKey={`${deckId}:${deferredKeyword.trim() ? 'q' : ''}`}
+        />
       </section>
 
       {!visibleCards.length ? <div className="empty-state">没有匹配的卡面</div> : null}

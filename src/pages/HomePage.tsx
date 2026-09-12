@@ -4,7 +4,7 @@ import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
 import { HomeNowPlaying } from '../components/HomeNowPlaying'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
-import { importDeckZip, type ImportProgress } from '../lib/zipPackage'
+import type { ImportProgress } from '../lib/zipPackage'
 import {
   CURATED_SERVER_PACKAGES,
   downloadServerPackage,
@@ -105,7 +105,7 @@ export function HomePage() {
   const { decks, loading, refresh } = useDeckList()
   const { settings, update } = useSettings()
   const [selectedId, setSelectedId] = useState<string | undefined>()
-  const { deck } = useDeck(selectedId)
+  const { deck, loading: deckLoading } = useDeck(selectedId)
   const [busy, setBusy] = useState(false)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -129,7 +129,7 @@ export function HomePage() {
   }, [])
 
   const previewCard = deck?.cards[previewIndex] || null
-  const previewUrl = useObjectUrl(previewCard?.imageBlobKey)
+  const previewUrl = useObjectUrl(previewCard?.imageBlobKey, { thumbnail: true })
 
   const curatedServerPackages = useMemo(
     () =>
@@ -179,6 +179,7 @@ export function HomePage() {
         setImportProgress({ stage: 'reading', current: loaded, total, fileName: serverPackage.fileName })
       })
       const file = new File([blob], serverPackage.fileName, { type: 'application/zip' })
+      const { importDeckZip } = await import('../lib/zipPackage')
       const imported = await importDeckZip(
         file,
         serverPackage.name,
@@ -211,17 +212,25 @@ export function HomePage() {
 
   async function createEmptyDeck() {
     const name = window.prompt('新数据集名称', `deck-${decks.length + 1}`)
-    if (!name) return
-    const id = createId('deck')
-    await saveDeck({
-      id,
-      name: name.trim(),
-      updatedAt: Date.now(),
-      cards: [],
-    })
-    await refresh()
-    setSelectedId(id)
-    navigate(`/editor/${id}`)
+    if (!name?.trim() || busy) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const id = createId('deck')
+      await saveDeck({
+        id,
+        name: name.trim(),
+        updatedAt: Date.now(),
+        cards: [],
+      })
+      await refresh()
+      setSelectedId(id)
+      navigate(`/editor/${id}`)
+    } catch (error) {
+      setMessage(readableImportError(error))
+    } finally {
+      setBusy(false)
+    }
   }
 
   function startGame() {
@@ -244,7 +253,7 @@ export function HomePage() {
           <h1>歌牌对战</h1>
           <p>把本地曲库变成一座闪耀的节奏舞台：先选曲，再和朋友进行 1v1 抢牌。</p>
           <div className="row home-hero-actions">
-            <button className="btn btn-primary btn-lg" type="button" onClick={startGame}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={startGame} disabled={deckLoading && !deck}>
               开始歌牌对战
             </button>
             <Link className="btn btn-secondary btn-lg" to="/online">
@@ -285,7 +294,7 @@ export function HomePage() {
             <button className="btn btn-secondary" type="button" onClick={() => void refreshServerPackages()} disabled={packagesLoading || busy}>
               刷新服务器包
             </button>
-            <button className="btn btn-secondary" type="button" onClick={() => void createEmptyDeck()}>
+            <button className="btn btn-secondary" type="button" onClick={() => void createEmptyDeck()} disabled={busy}>
               新建本地数据集
             </button>
             {selectedId ? (
@@ -422,7 +431,7 @@ export function HomePage() {
                 />
               </div>
             </div>
-            <button className="btn btn-primary btn-lg btn-block" type="button" onClick={startGame}>
+            <button className="btn btn-primary btn-lg btn-block" type="button" onClick={startGame} disabled={deckLoading && !deck}>
               开始本地歌牌对战
             </button>
           </div>
@@ -431,10 +440,12 @@ export function HomePage() {
         <section className="panel cool stack">
           <div>
             <h2 style={{ margin: '0 0 6px', fontFamily: 'var(--display)' }}>
-              {deck?.name || '未选择数据集'}
+              {deckLoading && !deck ? '正在读取本地牌组…' : deck?.name || '未选择数据集'}
             </h2>
             <p className="muted small">
-              卡牌 {deck?.cards.length || 0} · 歌曲 {songCount}
+              {deckLoading && !deck
+                ? '卡面和歌曲列表会在读取完成后出现'
+                : `卡牌 ${deck?.cards.length || 0} · 歌曲 ${songCount}`}
             </p>
           </div>
 
@@ -442,7 +453,7 @@ export function HomePage() {
             {previewUrl ? (
               <img src={previewUrl} alt={previewCard?.workName || ''} />
             ) : (
-              <span className="muted">卡面预览区域</span>
+              <span className="muted">{deckLoading && selectedId ? '正在准备卡面预览' : '卡面预览区域'}</span>
             )}
           </div>
 

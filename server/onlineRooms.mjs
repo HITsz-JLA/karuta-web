@@ -21,9 +21,9 @@ const REST_WINDOW_MS = 40_000
 const WRONG_TRANSFER_TIMEOUT_MS = REST_WINDOW_MS
 const REST_AUDIO_GRACE_MS = 10_000
 const ROUND_WINDOW_MS = 10_000
-// The round is announced separately from its authoritative start. Clients must
-// download the complete audio response into local storage and acknowledge it
-// before this small lead is used to fan out the synchronized start timestamp.
+// Clients must finish downloading and decoding the round audio before they
+// acknowledge ready. This lead is only a short clock-sync margin so both
+// browsers can start the same playId from the beginning together.
 const ROUND_SYNC_LEAD_MS = 2_000
 const ROOM_TTL_MS = 30 * 60 * 1000
 const RESUME_TTL_MS = 90 * 1000
@@ -197,6 +197,9 @@ export class OnlineRoomManager {
           break
         case 'audioReady':
           this.currentRoom(session)?.audioReady(session, message)
+          break
+        case 'matchAudioReady':
+          this.currentRoom(session)?.markMatchAudioReady(session)
           break
         case 'leaveRoom':
           this.leave(session)
@@ -652,6 +655,11 @@ class OnlineRoom {
     this.restRemainingSongs = []
     this.arrangeReadyStartAt = null
     this.restReadyStartAt = null
+    this.matchTracks = new Map()
+    this.songTokenById = new Map()
+    this.matchAudioReady = new Set()
+    this.startAfterMatchAudio = false
+    this.matchAudioWaitTimer = null
     this.pendingTransfer = null
     this.lastActivity = Date.now()
     this.viewVersion = 0
@@ -800,6 +808,7 @@ class OnlineRoom {
     this.restRemainingSongs = []
     this.arrangeReadyStartAt = null
     this.restReadyStartAt = null
+    this.clearMatchAudio()
     this.touch()
     this.manager.broadcastRoomList()
     this.sendRoom()
@@ -875,9 +884,11 @@ class OnlineRoom {
     for (const playerId of ['A', 'B']) {
       if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
     }
+    this.buildMatchAudioTracks()
     this.touch()
     this.manager.broadcastRoomList()
     this.sendRoom()
+    this.broadcastMatchAudio()
     this.scheduleArrangeStart(ARRANGE_WINDOW_MS)
   }
 
@@ -905,17 +916,37 @@ class OnlineRoom {
     if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
     this.arrangeTimer = setTimeout(() => {
       this.arrangeTimer = null
-      this.startPlaying()
+      this.requestStartPlaying()
     }, delay)
+  }
+
+  bothMatchAudioReady() {
+    return this.matchAudioReady.has('A') && this.matchAudioReady.has('B')
+  }
+
+  requestStartPlaying() {
+    if (this.disposed || this.phase !== 'arrange') return
+    if (!this.matchTracks.size || this.bothMatchAudioReady()) {
+      this.startPlaying()
+      return
+    }
+    if (this.startAfterMatchAudio) return
+    this.startAfterMatchAudio = true
+    this.arrangeReadyStartAt = null
+    this.touch()
+    this.sendRoom()
   }
 
   startPlaying() {
     if (this.disposed || this.phase !== 'arrange') return
     if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
+    if (this.matchAudioWaitTimer) clearTimeout(this.matchAudioWaitTimer)
     this.arrangeTimer = null
+    this.matchAudioWaitTimer = null
     this.phase = 'playing'
     this.arrangeEndsAt = null
     this.arrangeReadyStartAt = null
+    this.startAfterMatchAudio = false
     for (const playerId of ['A', 'B']) {
       if (this.seats[playerId]) this.seats[playerId].arrangeReady = false
     }
@@ -923,6 +954,19 @@ class OnlineRoom {
     this.manager.broadcastRoomList()
     this.sendRoom()
     this.scheduleNextRound(600)
+  }
+
+  markMatchAudioReady(session) {
+    const playerId = this.playerIdFor(session)
+    if (!playerId || (this.phase !== 'arrange' && this.phase !== 'playing')) return
+    if (!this.matchAudioReady.has(playerId)) {
+      this.matchAudioReady.add(playerId)
+      this.touch()
+      this.sendRoom()
+    }
+    if (this.phase === 'arrange' && this.startAfterMatchAudio && this.bothMatchAudioReady()) {
+      this.startPlaying()
+    }
   }
 
   scheduleNextRound(delay) {
@@ -967,7 +1011,7 @@ class OnlineRoom {
     }
     const choice = choices[Math.floor(Math.random() * choices.length)]
     if (choice.isEmpty) this.emptyRemainingSongs.splice(choice.index, 1)
-    const token = crypto.randomBytes(20).toString('base64url')
+    const token = this.tokenForSong(choice.song)
     this.roundNo += 1
     this.current = {
       roundNo: this.roundNo,
@@ -1004,6 +1048,7 @@ class OnlineRoom {
     this.broadcast({
       t: 'roundPrepare',
       roundNo: this.roundNo,
+      playId: this.roundNo,
       audioUrl: `/api/online/room/${this.code}/audio/${token}`,
     })
     this.sendRoom()
@@ -1047,6 +1092,7 @@ class OnlineRoom {
     this.broadcast({
       t: 'roundStart',
       roundNo: current.roundNo,
+      playId: current.roundNo,
       startAtServerTime: startAt,
       windowMs: ROUND_WINDOW_MS,
       audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
@@ -1364,6 +1410,7 @@ class OnlineRoom {
     })
     if (this.phase === 'arrange') {
       seat.arrangeReady = false
+      this.matchAudioReady.delete(playerId)
       if (this.arrangeReadyStartAt) {
         this.arrangeReadyStartAt = null
         this.scheduleArrangeStart(Math.max(0, (this.arrangeEndsAt || Date.now()) - Date.now()))
@@ -1422,6 +1469,7 @@ class OnlineRoom {
     this.remaining = new Set(this.cards.map((card) => card.key))
     this.restReadyStartAt = null
     this.arrangeReadyStartAt = null
+    this.clearMatchAudio()
     this.scores = EMPTY_SCORES()
     this.matchWinner = null
     for (const playerId of ['A', 'B']) {
@@ -1447,17 +1495,81 @@ class OnlineRoom {
     const restSong = this.takeRestSong()
     if (!restSong) return
     current.restSong = restSong
-    current.restToken = crypto.randomBytes(20).toString('base64url')
+    current.restToken = this.tokenForSong(restSong)
     current.restAudioUrl = `/api/online/room/${this.code}/audio/${current.restToken}`
     current.restExpiresAt = current.restEndsAtServerTime + REST_AUDIO_GRACE_MS
   }
 
   takeRestSong() {
     if (!this.restRemainingSongs.length && this.restSongs.length) this.restRemainingSongs = shuffle(this.restSongs)
-    return this.restRemainingSongs.shift() || null
+    const lastId = this.current?.song ? songIdentity(this.current.song) : ''
+    const index = this.restRemainingSongs.findIndex((song) => songIdentity(song) !== lastId)
+    if (index < 0) return this.restRemainingSongs.shift() || null
+    return this.restRemainingSongs.splice(index, 1)[0]
+  }
+
+  clearMatchAudio() {
+    if (this.matchAudioWaitTimer) clearTimeout(this.matchAudioWaitTimer)
+    this.matchAudioWaitTimer = null
+    this.matchTracks = new Map()
+    this.songTokenById = new Map()
+    this.matchAudioReady = new Set()
+    this.startAfterMatchAudio = false
+  }
+
+  tokenForSong(song) {
+    const id = songIdentity(song)
+    const existing = this.songTokenById.get(id)
+    if (existing) return existing
+    const token = crypto.randomBytes(20).toString('base64url')
+    this.songTokenById.set(id, token)
+    this.matchTracks.set(token, song)
+    return token
+  }
+
+  buildMatchAudioTracks() {
+    if (this.matchAudioWaitTimer) clearTimeout(this.matchAudioWaitTimer)
+    this.matchAudioWaitTimer = null
+    this.matchTracks = new Map()
+    this.songTokenById = new Map()
+    this.matchAudioReady = new Set()
+    this.startAfterMatchAudio = false
+    for (const key of this.remaining) {
+      for (const song of this.cardByKey.get(key)?.songs || []) this.tokenForSong(song)
+    }
+    for (const song of this.emptySongs) this.tokenForSong(song)
+    for (const song of this.restSongs) this.tokenForSong(song)
+  }
+
+  matchAudioMessage() {
+    const tracks = shuffle(
+      [...this.matchTracks.keys()].map((token) => ({
+        audioUrl: `/api/online/room/${this.code}/audio/${token}`,
+      })),
+    )
+    return { t: 'matchAudio', tracks, total: tracks.length }
+  }
+
+  broadcastMatchAudio() {
+    if (!this.matchTracks.size) return
+    this.broadcast(this.matchAudioMessage())
+  }
+
+  sendMatchAudio(session) {
+    if (!this.matchTracks.size) return
+    this.manager.send(session, this.matchAudioMessage())
   }
 
   assetForToken(token) {
+    const matchSong = this.matchTracks.get(token)
+    if (matchSong && (this.phase === 'arrange' || this.phase === 'playing')) {
+      return {
+        packageId: this.packageId,
+        sourcePath: matchSong.sourcePath,
+        fileName: matchSong.fileName,
+        expiresAt: Date.now() + ROOM_TTL_MS,
+      }
+    }
     const current = this.current
     if (!current) return null
     const asset =
@@ -1496,6 +1608,7 @@ class OnlineRoom {
   }
 
   sendCurrentState(session) {
+    if (this.matchTracks.size) this.sendMatchAudio(session)
     const current = this.current
     if (!current) return
 
@@ -1518,6 +1631,7 @@ class OnlineRoom {
       this.manager.send(session, {
         t: 'roundPrepare',
         roundNo: current.roundNo,
+        playId: current.roundNo,
         audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
       })
       return
@@ -1526,6 +1640,7 @@ class OnlineRoom {
     this.manager.send(session, {
       t: 'roundStart',
       roundNo: current.roundNo,
+      playId: current.roundNo,
       startAtServerTime: current.startAt,
       windowMs: ROUND_WINDOW_MS,
       audioUrl: `/api/online/room/${this.code}/audio/${current.token}`,
@@ -1613,6 +1728,8 @@ class OnlineRoom {
       restAudioUrl: this.current?.restAudioUrl || null,
       arrangeReadyStartAtServerTime: this.arrangeReadyStartAt,
       restReadyStartAtServerTime: this.restReadyStartAt,
+      matchAudioTotal: this.matchTracks.size,
+      waitingMatchAudio: this.startAfterMatchAudio,
       roundNo: this.roundNo,
       matchWinner: this.matchWinner,
       fairness: this.fairnessView(),
@@ -1629,6 +1746,7 @@ class OnlineRoom {
       nickname: seat.nickname,
       connected: Boolean(seat.socket),
       audioReady: Boolean(this.current && !this.current.resolved && this.current.audioReady?.has(playerId)),
+      matchAudioReady: this.matchAudioReady.has(playerId),
       ready: seat.ready,
       arrangeReady: seat.arrangeReady,
       restReady: seat.restReady,
@@ -1737,11 +1855,13 @@ class OnlineRoom {
     if (this.roundTimer) clearTimeout(this.roundTimer)
     if (this.nextRoundTimer) clearTimeout(this.nextRoundTimer)
     if (this.arrangeTimer) clearTimeout(this.arrangeTimer)
+    if (this.matchAudioWaitTimer) clearTimeout(this.matchAudioWaitTimer)
     if (this.current?.settlementTimer) clearTimeout(this.current.settlementTimer)
     if (this.current?.transferTimer) clearTimeout(this.current.transferTimer)
     this.roundTimer = null
     this.nextRoundTimer = null
     this.arrangeTimer = null
+    this.matchAudioWaitTimer = null
     if (this.current) this.current.settlementTimer = null
     if (this.current) this.current.transferTimer = null
     this.pendingTransfer = null
