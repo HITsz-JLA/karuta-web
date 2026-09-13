@@ -16,6 +16,7 @@ const BAN_SIZE = 5
 const HAND_SIZE = DRAFT_SELECTION_SIZE - BAN_SIZE
 const MAX_HAND_SLOTS = 33
 const EMPTY_SONG_COUNT = 20
+export const MATCH_AUDIO_PRELOAD_LIMIT = 70
 const ARRANGE_WINDOW_MS = 3 * 60 * 1000
 const REST_WINDOW_MS = 40_000
 const WRONG_TRANSFER_TIMEOUT_MS = REST_WINDOW_MS
@@ -687,6 +688,7 @@ class OnlineRoom {
     this.restReadyStartAt = null
     this.matchTracks = new Map()
     this.songTokenById = new Map()
+    this.matchAudioPreloadTokens = []
     this.matchAudioReady = new Set()
     this.startAfterMatchAudio = false
     this.matchAudioWaitTimer = null
@@ -956,7 +958,7 @@ class OnlineRoom {
 
   requestStartPlaying() {
     if (this.disposed || this.phase !== 'arrange') return
-    if (!this.matchTracks.size || this.bothMatchAudioReady()) {
+    if (!this.matchAudioPreloadTokens.length || this.bothMatchAudioReady()) {
       this.startPlaying()
       return
     }
@@ -1543,6 +1545,7 @@ class OnlineRoom {
     this.matchAudioWaitTimer = null
     this.matchTracks = new Map()
     this.songTokenById = new Map()
+    this.matchAudioPreloadTokens = []
     this.matchAudioReady = new Set()
     this.startAfterMatchAudio = false
   }
@@ -1562,31 +1565,34 @@ class OnlineRoom {
     this.matchAudioWaitTimer = null
     this.matchTracks = new Map()
     this.songTokenById = new Map()
+    this.matchAudioPreloadTokens = []
     this.matchAudioReady = new Set()
     this.startAfterMatchAudio = false
+    const preloadTokens = []
     for (const key of this.remaining) {
-      for (const song of this.cardByKey.get(key)?.songs || []) this.tokenForSong(song)
+      for (const song of this.cardByKey.get(key)?.songs || []) preloadTokens.push(this.tokenForSong(song))
     }
-    for (const song of this.emptySongs) this.tokenForSong(song)
-    for (const song of this.restSongs) this.tokenForSong(song)
+    for (const song of this.emptySongs) preloadTokens.push(this.tokenForSong(song))
+    // Rest songs intentionally stay out of the bulk preload. They receive a
+    // one-use token in prepareRestAudio() and are fetched opportunistically
+    // while the 40-second rest window is already running.
+    this.matchAudioPreloadTokens = shuffle(preloadTokens).slice(0, MATCH_AUDIO_PRELOAD_LIMIT)
   }
 
   matchAudioMessage() {
-    const tracks = shuffle(
-      [...this.matchTracks.keys()].map((token) => ({
-        audioUrl: `/api/online/room/${this.code}/audio/${token}`,
-      })),
-    )
+    const tracks = this.matchAudioPreloadTokens.map((token) => ({
+      audioUrl: `/api/online/room/${this.code}/audio/${token}`,
+    }))
     return { t: 'matchAudio', tracks, total: tracks.length }
   }
 
   broadcastMatchAudio() {
-    if (!this.matchTracks.size) return
+    if (!this.matchAudioPreloadTokens.length) return
     this.broadcast(this.matchAudioMessage())
   }
 
   sendMatchAudio(session) {
-    if (!this.matchTracks.size) return
+    if (!this.matchAudioPreloadTokens.length) return
     this.manager.send(session, this.matchAudioMessage())
   }
 
@@ -1638,7 +1644,7 @@ class OnlineRoom {
   }
 
   sendCurrentState(session) {
-    if (this.matchTracks.size) this.sendMatchAudio(session)
+    if (this.matchAudioPreloadTokens.length) this.sendMatchAudio(session)
     const current = this.current
     if (!current) return
 
@@ -1758,7 +1764,7 @@ class OnlineRoom {
       restAudioUrl: this.current?.restAudioUrl || null,
       arrangeReadyStartAtServerTime: this.arrangeReadyStartAt,
       restReadyStartAtServerTime: this.restReadyStartAt,
-      matchAudioTotal: this.matchTracks.size,
+      matchAudioTotal: this.matchAudioPreloadTokens.length,
       waitingMatchAudio: this.startAfterMatchAudio,
       roundNo: this.roundNo,
       matchWinner: this.matchWinner,
