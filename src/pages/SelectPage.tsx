@@ -31,6 +31,8 @@ interface LocalCardGridProps {
   resetKey: string
 }
 
+type CardFilter = 'all' | 'selected' | 'unselected'
+
 /** Keeps the complete local deck scrollable while mounting only nearby rows. */
 function LocalCardGrid({ cards, selectedIds, onToggle, resetKey }: LocalCardGridProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
@@ -115,6 +117,7 @@ export function SelectPage() {
   const [initialized, setInitialized] = useState(false)
   const [keyword, setKeyword] = useState('')
   const [numberInput, setNumberInput] = useState('')
+  const [cardFilter, setCardFilter] = useState<CardFilter>('all')
   const [emptyMode, setEmptyMode] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const deferredKeyword = useDeferredValue(keyword)
@@ -148,7 +151,7 @@ export function SelectPage() {
     return result
   }, [deck])
 
-  const visibleCards = useMemo(() => {
+  const matchingCards = useMemo(() => {
     if (!deck) return []
     const q = deferredKeyword.trim().toLowerCase()
     if (!q) return deck.cards
@@ -156,6 +159,17 @@ export function SelectPage() {
       .filter(({ workName, number, hashNumber }) => workName.includes(q) || number.includes(q) || hashNumber.includes(q))
       .map(({ card }) => card)
   }, [deck, deferredKeyword, searchableCards])
+
+  const visibleCards = useMemo(() => {
+    if (cardFilter === 'all') return matchingCards
+    const selected = cardFilter === 'selected'
+    return matchingCards.filter((card) => selectedIds.has(card.id) === selected)
+  }, [cardFilter, matchingCards, selectedIds])
+
+  const selectedMatchingCount = useMemo(
+    () => matchingCards.reduce((count, card) => count + (selectedIds.has(card.id) ? 1 : 0), 0),
+    [matchingCards, selectedIds],
+  )
 
   const toggleCard = useCallback((cardId: string) => {
     setSelectedIds((prev) => {
@@ -247,10 +261,19 @@ export function SelectPage() {
   return (
     <>
       <section className="hero">
-        <h1>选择本局参赛卡牌</h1>
-        <p>
-          已选 {selectedIds.size} / {cardLimit} 张。可搜索标题，或直接输入牌号快速录入。
-        </p>
+        <div className="row spread selection-heading">
+          <div>
+            <h1>选择本局参赛卡牌</h1>
+            <p>可搜索标题、按牌号录入，或用筛选快速检查选中结果。</p>
+          </div>
+          <div className="selection-count" aria-live="polite">
+            <strong>{selectedIds.size}</strong>
+            <span>/ {cardLimit} 张已选</span>
+          </div>
+        </div>
+        <div className="selection-progress" role="progressbar" aria-label="已选卡牌数量" aria-valuemin={0} aria-valuemax={cardLimit} aria-valuenow={Math.min(selectedIds.size, cardLimit)}>
+          <span style={{ width: `${Math.min(100, (selectedIds.size / cardLimit) * 100)}%` }} />
+        </div>
       </section>
 
       <section className="panel stack">
@@ -260,7 +283,7 @@ export function SelectPage() {
             <input
               id="numberEntry"
               inputMode="numeric"
-              placeholder="例如 1 5 12 或 3- 直接输入编号"
+              placeholder="例如 1 5 12 或 3"
               value={numberInput}
               onChange={(event) => setNumberInput(event.target.value)}
               onKeyDown={(event) => {
@@ -316,6 +339,28 @@ export function SelectPage() {
           </button>
         </div>
 
+        <div className="row selection-toolbar" aria-label="卡牌筛选">
+          <span className="muted small">显示</span>
+          {(
+            [
+              ['all', `全部 ${matchingCards.length}`],
+              ['selected', `已选 ${selectedMatchingCount}`],
+              ['unselected', `未选 ${matchingCards.length - selectedMatchingCount}`],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              className={`filter-chip${cardFilter === value ? ' active' : ''}`}
+              type="button"
+              aria-pressed={cardFilter === value}
+              onClick={() => setCardFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
+          <span className="muted small selection-result-count">当前显示 {visibleCards.length} 张</span>
+        </div>
+
         <label className="row">
           <input type="checkbox" checked={emptyMode} onChange={(event) => setEmptyMode(event.target.checked)} />
           空牌开始模式（从未选中牌中抽取等量空牌）
@@ -327,7 +372,7 @@ export function SelectPage() {
           cards={visibleCards}
           selectedIds={selectedIds}
           onToggle={toggleCard}
-          resetKey={`${deckId}:${deferredKeyword.trim() ? 'q' : ''}`}
+          resetKey={`${deckId}:${deferredKeyword.trim()}:${cardFilter}`}
         />
       </section>
 

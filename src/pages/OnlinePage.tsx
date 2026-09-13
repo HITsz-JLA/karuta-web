@@ -578,9 +578,14 @@ export function OnlinePage() {
 
     const prepare = async () => {
       try {
+        const isRestAudio = role === 'rest'
+        if (isRestAudio && localAudioUrlRef.current) {
+          URL.revokeObjectURL(localAudioUrlRef.current.url)
+          localAudioUrlRef.current = null
+        }
         const existing = localAudioUrlRef.current
         let localUrl = existing?.source === source ? existing.url : null
-        if (!localUrl) {
+        if (!localUrl && !isRestAudio) {
           const blob = await preloadOnlineAudio(source)
           if (cancelled || generation !== audioGenerationRef.current) return
           localUrl = URL.createObjectURL(blob)
@@ -588,22 +593,23 @@ export function OnlinePage() {
           localAudioUrlRef.current = { source, url: localUrl }
           if (previous && previous.url !== localUrl) URL.revokeObjectURL(previous.url)
         }
+        if (!localUrl && isRestAudio) localUrl = source
         if (!localUrl || cancelled || generation !== audioGenerationRef.current) return
 
         if (!mediaHasUrl(audio, localUrl)) audio.src = localUrl
         // Reload even when the URL is unchanged. This is required after a
         // decode/network error; otherwise the retry button only re-runs the
         // promise and leaves the media element stuck in its error state.
-        audio.preload = 'auto'
+        audio.preload = isRestAudio ? 'none' : 'auto'
         audio.load()
         audio.muted = false
-        audio.volume = onlineVolumeRef.current * (role === 'rest' ? REST_AUDIO_VOLUME : 1)
-        if (role === 'rest' || !attachedToSource) resetRoundPlaybackToStart(audio)
-        await waitForMediaReady(audio)
-        if (cancelled || generation !== audioGenerationRef.current) return
-        setLocalAudioReady(true)
+        audio.volume = onlineVolumeRef.current * (isRestAudio ? REST_AUDIO_VOLUME : 1)
+        if (!isRestAudio) {
+          resetRoundPlaybackToStart(audio)
+          await waitForMediaReady(audio)
+          if (cancelled || generation !== audioGenerationRef.current) return
+          setLocalAudioReady(true)
 
-        if (role === 'listen') {
           const preparing = Boolean(roundPreparationRef.current && !roundRef.current)
           if (preparing) {
             setAudioStatus('loaded')
@@ -624,10 +630,20 @@ export function OnlinePage() {
           }
         } catch (error: unknown) {
           if (generation !== audioGenerationRef.current) return
-          setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
+          if (error instanceof DOMException && error.name === 'NotAllowedError') {
+            setAudioStatus('blocked')
+          } else {
+            // Rest music is best-effort. A network/decode failure must not
+            // surface as a match error or block the next formal round.
+            setAudioStatus(audioUnlockedRef.current ? 'ready' : 'idle')
+          }
         }
       } catch (error: unknown) {
         if (cancelled || generation !== audioGenerationRef.current) return
+        if (role === 'rest') {
+          setAudioStatus(audioUnlockedRef.current ? 'ready' : 'idle')
+          return
+        }
         setLocalAudioReady(false)
         setAudioStatus('error')
         setMessage(error instanceof Error ? error.message : '音频预加载失败，请点击重试')
@@ -1382,12 +1398,13 @@ export function OnlinePage() {
   const waitingMatchAudio = Boolean(room.waitingMatchAudio)
   const matchAudioTotal = room.matchAudioTotal || matchAudio?.total || 0
   const matchAudioProgress = matchAudioTotal > 0 ? `${matchAudioLoaded}/${matchAudioTotal}` : ''
+  const matchAudioLabel = matchAudioProgress ? `预加载歌曲 ${matchAudioProgress}` : '预加载歌曲'
   const matchAudioPending = Boolean(matchAudioTotal && matchAudioLoaded < matchAudioTotal)
   const stageLabel = matchIsOver
     ? '本局结束'
     : isOpeningArrange
       ? waitingMatchAudio
-        ? '等待场上音频'
+        ? '等待预加载音频'
         : '开局排牌'
       : isPreparingRound
         ? '音频准备中'
@@ -1408,12 +1425,12 @@ export function OnlinePage() {
     : isOpeningArrange
     ? arrangeReadyRemaining > 0
       ? matchAudioPending
-        ? `双方已准备 · ${arrangeReadySeconds} 秒后开始 · 场上歌曲 ${matchAudioProgress}`
+        ? `双方已准备 · ${arrangeReadySeconds} 秒后开始 · ${matchAudioLabel}`
         : `双方已准备 · ${arrangeReadySeconds} 秒后开始游戏`
       : waitingMatchAudio
-        ? `开局已推迟 · 等待双方场上歌曲就绪${matchAudioProgress ? ` · ${matchAudioProgress}` : ''}`
+        ? `开局已推迟 · 等待双方预加载歌曲就绪${matchAudioProgress ? ` · ${matchAudioProgress}` : ''}`
         : matchAudioPending
-          ? `排牌准备中 · 场上歌曲 ${matchAudioProgress} · ${Math.ceil(arrangeRemaining / 1000)} 秒后尝试开始`
+          ? `排牌准备中 · ${matchAudioLabel} · ${Math.ceil(arrangeRemaining / 1000)} 秒后尝试开始`
           : `排牌准备中 · ${Math.ceil(arrangeRemaining / 1000)} 秒后自动开始`
     : isPreparingRound
       ? room.spectator
@@ -1454,7 +1471,7 @@ export function OnlinePage() {
                 ? `对局已结束 · 第 ${matchRounds} 回合 · 最终牌区已保留`
                 : isOpeningArrange
                 ? waitingMatchAudio
-                  ? `排牌时间已到，等待双方场上音频加载完成后再开局 · ${ownHandKeys.length} 张手牌`
+                  ? `排牌时间已到，等待双方预加载音频完成后再开局 · ${ownHandKeys.length} 张手牌`
                   : `剩余 ${Math.ceil(arrangeRemaining / 1000)} 秒完成自己的牌区布局 · ${ownHandKeys.length} 张手牌`
                 : `第 ${room.roundNo || round?.roundNo || 0} 回合 · 场上实牌 ${room.remainingCardKeys.length} 张`}
             </p>

@@ -8,6 +8,7 @@ const SelectPage = lazy(() => import('./pages/SelectPage').then((module) => ({ d
 const AdminPage = lazy(() => import('./pages/AdminPage').then((module) => ({ default: module.AdminPage })))
 const EditorPage = lazy(() => import('./pages/EditorPage').then((module) => ({ default: module.EditorPage })))
 const OnlinePage = lazy(() => import('./pages/OnlinePage').then((module) => ({ default: module.OnlinePage })))
+const PackagePreviewPage = lazy(() => import('./pages/PackagePreviewPage').then((module) => ({ default: module.PackagePreviewPage })))
 
 function RouteFallback() {
   return (
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="editor/:deckId" element={<EditorPage />} />
           <Route path="select/:deckId" element={<SelectPage />} />
           <Route path="game/:deckId" element={<GamePage />} />
+          <Route path="preview/:packageId" element={<PackagePreviewPage />} />
           <Route path="online" element={<OnlinePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

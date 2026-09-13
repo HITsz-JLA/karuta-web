@@ -14,12 +14,18 @@ export interface ServerPackageDownloadProgress {
   total: number
 }
 
+export interface ServerPackageSong {
+  fileName: string
+  displayName: string
+}
+
 export interface ServerPackageCatalogCard {
   key: string
   number: number
   imageName: string
   workName: string
   songCount: number
+  songs: ServerPackageSong[]
 }
 
 export interface ServerPackageCatalog {
@@ -40,6 +46,7 @@ export const CURATED_MUCA_PACKAGES = [
 export const CURATED_SERVER_PACKAGES = [
   ...CURATED_MUCA_PACKAGES,
   { id: 'maimai-master-12plus.zip', code: 'MAI', name: 'maimai MASTER 12+', tone: 'maimai' },
+  { id: '旮一把-lite.zip', code: 'GAYI', name: '旮一把', tone: 'gayi' },
 ] as const
 
 export function isCuratedMucaPackage(packageId: string | undefined): boolean {
@@ -55,6 +62,10 @@ export async function getServerPackageCatalog(packageId: string): Promise<Server
 
 export function serverCardImageUrl(packageId: string, cardKey: string): string {
   return `/api/packages/${encodeURIComponent(packageId)}/card-image?cardKey=${encodeURIComponent(cardKey)}`
+}
+
+export function previewAudioUrl(packageId: string, cardKey: string, songIndex: number): string {
+  return `/api/packages/${encodeURIComponent(packageId)}/preview-audio?cardKey=${encodeURIComponent(cardKey)}&songIndex=${songIndex}`
 }
 
 export type ServerPackageDownloadProgressHandler = (progress: ServerPackageDownloadProgress) => void

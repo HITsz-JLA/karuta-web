@@ -9,6 +9,7 @@ export const CURATED_PACKAGE_IDS = new Set([
   'jla-muca-galgame-lite.zip',
   'jla-muca-anime-lite.zip',
   'maimai-master-12plus.zip',
+  '旮一把-lite.zip',
 ])
 
 const catalogCache = new Map()

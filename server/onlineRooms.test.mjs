@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import JSZip from 'jszip'
-import { OnlineRoomManager } from './onlineRooms.mjs'
+import { MATCH_AUDIO_PRELOAD_LIMIT, OnlineRoomManager } from './onlineRooms.mjs'
 
 class FakeSocket {
   readyState = 1
@@ -21,13 +21,16 @@ class FakeSocket {
   }
 }
 
-async function writeCatalogPackage(directory, count = 60) {
+async function writeCatalogPackage(directory, count = 60, songsPerCard = 1) {
   const zip = new JSZip()
   const rows = ['category,work_number,work_name,song_slot,song_title,audio_file,audio_path,cover_files,cover_paths']
   for (let index = 1; index <= count; index += 1) {
-    rows.push(`anime,${index},作品${index},1,歌曲${index},${index}.mp3,mp3_files/seg_30/anime/${index}.mp3,${index}.jpg,images/${index}.jpg`)
+    for (let songIndex = 1; songIndex <= songsPerCard; songIndex += 1) {
+      const songId = `${index}-${songIndex}`
+      rows.push(`anime,${index},作品${index},${songIndex},歌曲${songId},${songId}.mp3,mp3_files/seg_30/anime/${songId}.mp3,${index}.jpg,images/${index}.jpg`)
+      zip.file(`mp3_files/seg_30/anime/${songId}.mp3`, Buffer.from(`audio-${songId}`))
+    }
     zip.file(`images/${index}.jpg`, Buffer.from(`image-${index}`))
-    zip.file(`mp3_files/seg_30/anime/${index}.mp3`, Buffer.from(`audio-${index}`))
   }
   const packageId = 'jla-muca-anime-lite.zip'
   zip.file('meta/metadata.csv', rows.join('\n'))
@@ -218,7 +221,7 @@ test('arrange broadcasts match audio and start waits until both clients finish l
   const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-match-audio-'))
   const manager = new OnlineRoomManager(temp)
   try {
-    const packageId = await writeCatalogPackage(temp)
+    const packageId = await writeCatalogPackage(temp, 60, 2)
     const hostSocket = new FakeSocket()
     const guestSocket = new FakeSocket()
     const host = manager.connect(hostSocket)
@@ -236,12 +239,18 @@ test('arrange broadcasts match audio and start waits until both clients finish l
     assert.equal(matchAudio.tracks.length, matchAudio.total)
     assert.ok(matchAudio.tracks.every((track) => typeof track.audioUrl === 'string' && track.audioUrl.includes('/audio/')))
     assert.equal(latest(hostSocket, 'room').room.matchAudioTotal, matchAudio.total)
-    const expectedMatchAudioIds = new Set([
+    const expectedFormalAudioIds = new Set([
       ...[...room.remaining].flatMap((key) => room.cardByKey.get(key)?.songs || []),
       ...room.emptySongs,
-      ...room.restSongs,
     ].map((song) => JSON.stringify(song)))
-    assert.equal(matchAudio.total, expectedMatchAudioIds.size)
+    const expectedRestAudioIds = new Set(room.restSongs.map((song) => JSON.stringify(song)))
+    const preloadedAudioIds = new Set(room.matchAudioPreloadTokens.map((token) => JSON.stringify(room.matchTracks.get(token))))
+    assert.equal(matchAudio.total, MATCH_AUDIO_PRELOAD_LIMIT)
+    assert.equal(matchAudio.total, room.matchAudioPreloadTokens.length)
+    assert.equal(preloadedAudioIds.size, MATCH_AUDIO_PRELOAD_LIMIT)
+    assert.equal([...preloadedAudioIds].every((id) => expectedFormalAudioIds.has(id)), true)
+    assert.equal([...preloadedAudioIds].some((id) => expectedRestAudioIds.has(id)), false)
+    assert.ok(room.matchTracks.size > matchAudio.total)
 
     room.requestStartPlaying()
     assert.equal(room.phase, 'arrange')
@@ -259,7 +268,9 @@ test('arrange broadcasts match audio and start waits until both clients finish l
     room.nextRound()
     const prepare = latest(hostSocket, 'roundPrepare')
     assert.ok(prepare)
-    assert.equal(matchAudio.tracks.some((track) => track.audioUrl === prepare.audioUrl), true)
+    const prepareToken = prepare.audioUrl.split('/').at(-1)
+    assert.ok(prepareToken)
+    assert.ok(room.matchTracks.has(prepareToken))
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -1011,13 +1022,17 @@ test('empty-song rounds use 20 outside songs once and treat every card click as 
     assert.ok(latest(hostSocket, 'room').room.restAudioUrl)
     const matchAudio = latest(hostSocket, 'matchAudio')
     const restAudioUrl = latest(hostSocket, 'room').room.restAudioUrl
-    assert.equal(matchAudio.tracks.some((track) => track.audioUrl === restAudioUrl), true)
+    assert.equal(matchAudio.tracks.some((track) => track.audioUrl === restAudioUrl), false)
+    const expectedPreloadedAudioIds = new Set(room.matchAudioPreloadTokens.map((token) => JSON.stringify(room.matchTracks.get(token))))
+    const expectedRestAudioIds = new Set(room.restSongs.map((song) => JSON.stringify(song)))
+    assert.equal(matchAudio.total, MATCH_AUDIO_PRELOAD_LIMIT)
+    assert.equal(matchAudio.total, room.matchAudioPreloadTokens.length)
+    assert.equal([...expectedPreloadedAudioIds].some((id) => expectedRestAudioIds.has(id)), false)
     const expectedMatchAudioIds = new Set([
       ...[...room.remaining].flatMap((key) => room.cardByKey.get(key)?.songs || []),
       ...room.emptySongs,
-      ...room.restSongs,
     ].map((song) => JSON.stringify(song)))
-    assert.equal(matchAudio.total, expectedMatchAudioIds.size)
+    assert.equal([...expectedPreloadedAudioIds].every((id) => expectedMatchAudioIds.has(id)), true)
     const fieldSongIds = new Set(room.cards.flatMap((card) => card.songs).map((song) => JSON.stringify(song)))
     const emptySongIds = new Set(room.emptySongs.map((song) => JSON.stringify(song)))
     assert.equal(fieldSongIds.has(JSON.stringify(room.current.restSong)), false)

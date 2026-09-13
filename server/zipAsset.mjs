@@ -219,7 +219,17 @@ function findMember(members, requestPath, fallbackName, kind) {
 
   if (!fallback) return null
   const byName = members.filter((member) => member.normalizedName.endsWith(`/${fallback}`) || member.normalizedName === fallback)
-  return byName.find((member) => (kind === 'image' ? isImageName(member.normalizedName) : isSegmentName(member.normalizedName))) || byName[0] || null
+  const matched = byName.find((member) => (kind === 'image' ? isImageName(member.normalizedName) : isSegmentName(member.normalizedName))) || byName[0]
+  if (matched) return matched
+
+  // Older Karuta exports keep the CSV at the archive root and use the deck
+  // name as its filename (for example, `旮一把.csv`). The browser importer
+  // already accepts that shape, so the public catalog reader should do the
+  // same without requiring a lossy re-pack of the user's ZIP.
+  if (kind === 'catalog') {
+    return members.find((member) => isCatalogName(member.normalizedName)) || null
+  }
+  return null
 }
 
 function audioRelativePath(value) {
@@ -240,6 +250,10 @@ function imageRelativePath(value) {
 
 function isImageName(value) {
   return /(?:^|\/)(?:music_cover|images|covers)\//.test(value)
+}
+
+function isCatalogName(value) {
+  return /\.csv$/i.test(value) && !/(^|\/)__macosx(?:\/|$)/i.test(value)
 }
 
 function normalize(value) {
