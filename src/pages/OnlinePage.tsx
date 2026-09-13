@@ -5,6 +5,7 @@ import { OnlineDraftBan, OnlineDraftSelect, OnlineRoomLobby } from './online/Onl
 import {
   type OnlineCardView,
   type OnlinePlayerId,
+  type OnlineResumeReason,
   type OnlineRoomSummary,
   type OnlineRoundResult,
   type OnlineRoundPrepare,
@@ -38,7 +39,14 @@ import {
   ONLINE_VOLUME_STORAGE_KEY,
   REST_AUDIO_VOLUME,
 } from './online/onlineConstants'
-import type { AudioStatus, BattleAnimation, BattleAnimationPayload, BattleStyle, ClaimState } from './online/onlineTypes'
+import type {
+  AudioStatus,
+  BattleAnimation,
+  BattleAnimationPayload,
+  BattleStyle,
+  ClaimState,
+  OnlineDraftSubmitState,
+} from './online/onlineTypes'
 import {
   acknowledgeRoundAudio,
   resetRoundPlaybackToStart,
@@ -46,7 +54,6 @@ import {
   clampOnlineVolume,
   createLayoutAnimation,
   createSilentAudioUrl,
-  isMediaPlayable,
   mediaHasUrl,
   mirrorBoardLayout,
   otherPlayer,
@@ -67,6 +74,98 @@ import {
   TransferPanel,
 } from './online/onlineViews'
 import { useOnlineBoardDrag } from './online/useOnlineBoardDrag'
+
+// A draft submission has no explicit server ack. The room snapshot that carries
+// the accepted count is the ack; if it does not arrive in time the confirm
+// button must show a retry state instead of pretending the pick was locked in.
+const DRAFT_SUBMIT_TIMEOUT_MS = 4_000
+
+type OnlineDiagKind = 'audio' | 'draft' | 'session'
+type OnlineDiagPayload = { kind: OnlineDiagKind; event: string; [key: string]: unknown }
+type OnlineDiagEntry = OnlineDiagPayload & { at: number }
+
+/**
+ * Lightweight, token-free diagnostics used to verify the reconnect, spectator
+ * audio and card-selection paths from a real browser. The ring buffer is
+ * intentionally small and never contains resume credentials or song identity.
+ */
+function pushOnlineDiag(entry: OnlineDiagPayload) {
+  if (typeof window === 'undefined') return
+  const store = window as unknown as { __karutaOnlineDiag?: OnlineDiagEntry[] }
+  const list = store.__karutaOnlineDiag || (store.__karutaOnlineDiag = [])
+  list.push({ ...entry, at: Date.now() })
+  if (list.length > 600) list.splice(0, list.length - 600)
+}
+
+function draftStorageKey(roomCode: string, phase: 'select' | 'ban') {
+  return `karuta-online-draft:${roomCode}:${phase}`
+}
+
+/**
+ * A refresh can lose a half-finished draft, so the current tab keeps it in
+ * sessionStorage. Restores are validated against the pool the server just sent,
+ * which keeps a stale room code from injecting keys into another draft.
+ */
+function readStoredDraft(roomCode: string, phase: 'select' | 'ban', pool: string[], limit: number) {
+  try {
+    const raw = sessionStorage.getItem(draftStorageKey(roomCode, phase))
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    const allowed = new Set(pool)
+    const keys = parsed.filter((key): key is string => typeof key === 'string' && allowed.has(key))
+    return [...new Set(keys)].slice(0, limit)
+  } catch {
+    return []
+  }
+}
+
+function writeStoredDraft(roomCode: string, phase: 'select' | 'ban', keys: Iterable<string>) {
+  try {
+    sessionStorage.setItem(draftStorageKey(roomCode, phase), JSON.stringify([...keys]))
+  } catch {
+    // Tab-local draft restore is a convenience, never a requirement to play.
+  }
+}
+
+function clearStoredDraft(roomCode: string) {
+  try {
+    sessionStorage.removeItem(draftStorageKey(roomCode, 'select'))
+    sessionStorage.removeItem(draftStorageKey(roomCode, 'ban'))
+  } catch {
+    // Nothing to clean up when sessionStorage is unavailable.
+  }
+}
+
+function draftSignature(keys: Iterable<string>) {
+  return [...keys].sort().join('\u0000')
+}
+
+/**
+ * Non-reversible short fingerprint of an audio URL. Diagnostics can prove
+ * "the element played the source that finished loading" without storing the
+ * token-bearing endpoint itself.
+ */
+function shortFingerprint(value: string) {
+  let hash = 0
+  for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) | 0
+  return Math.abs(hash).toString(36)
+}
+
+function resumeRejectedMessage(reason: OnlineResumeReason) {
+  switch (reason) {
+    case 'invalid_or_expired':
+      return '原对局的席位恢复凭证已失效（断线超过 90 秒或对局已结束），已返回大厅。'
+    case 'seat_occupied':
+      return '该席位已在其他页面或设备恢复，当前页面已停止重连并返回大厅。'
+    case 'seat_missing':
+      return '原对局席位已不存在（可能已结束或被顶替），已返回大厅。'
+    case 'session_already_bound':
+      return '当前连接已经绑定房间，恢复请求被忽略。'
+    default:
+      return '无法恢复原对局席位，已返回大厅。'
+  }
+}
 
 export function OnlinePage() {
   const [socket] = useState(() => new OnlineSocket())
@@ -115,6 +214,10 @@ export function OnlinePage() {
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('idle')
   const [audioRetryNonce, setAudioRetryNonce] = useState(0)
   const [localAudioReady, setLocalAudioReady] = useState(false)
+  // Readiness is bound to one concrete audio session (role + playId + source).
+  // A media element that is merely "playable" must never authorise playback of
+  // a source it has not loaded yet.
+  const [audioReadySession, setAudioReadySession] = useState<string | null>(null)
   const [matchAudio, setMatchAudio] = useState<{ urls: string[]; total: number } | null>(null)
   const [matchAudioLoaded, setMatchAudioLoaded] = useState(0)
   const matchAudioReadySentRef = useRef<string | null>(null)
@@ -124,6 +227,8 @@ export function OnlinePage() {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const roomRef = useRef<OnlineRoomView | null>(null)
+  const lastRoomDiagRef = useRef<string>('')
+  const awaitingRoomRestoreRef = useRef(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const onlineVolumeRef = useRef(onlineVolume)
@@ -140,6 +245,8 @@ export function OnlinePage() {
   const [boardSlots, setBoardSlots] = useState<Array<string | null>>(() => Array(MAX_HAND_SLOTS).fill(null))
   const [draftSelection, setDraftSelection] = useState<Set<string>>(new Set())
   const [draftBans, setDraftBans] = useState<Set<string>>(new Set())
+  const [draftSubmit, setDraftSubmit] = useState<OnlineDraftSubmitState>('idle')
+  const draftConfirmedRef = useRef<string>('')
   const [arrangeRemaining, setArrangeRemaining] = useState(0)
   const [pinnedKeys, setPinnedKeys] = useState<Set<string>>(new Set())
   const [pinMode, setPinMode] = useState(false)
@@ -346,6 +453,44 @@ export function OnlinePage() {
           phaseRef.current = incoming.room.phase
           roomRef.current = incoming.room
           setRoom(incoming.room)
+          if (awaitingRoomRestoreRef.current) {
+            awaitingRoomRestoreRef.current = false
+            pushOnlineDiag({
+              kind: 'session',
+              event: 'room-restored',
+              code: incoming.room.code,
+              phase: incoming.room.phase,
+              you: incoming.room.you,
+              spectator: incoming.room.spectator,
+            })
+          }
+          {
+            const signature = `${incoming.room.code}|${incoming.room.phase}|${incoming.room.you}|${incoming.room.spectator}|${incoming.room.roundNo}`
+            if (lastRoomDiagRef.current !== signature) {
+              lastRoomDiagRef.current = signature
+              pushOnlineDiag({
+                kind: 'session',
+                event: 'room',
+                code: incoming.room.code,
+                phase: incoming.room.phase,
+                you: incoming.room.you,
+                spectator: incoming.room.spectator,
+                roundNo: incoming.room.roundNo,
+                players: {
+                  A: incoming.room.players.A?.connected ?? false,
+                  B: incoming.room.players.B?.connected ?? false,
+                },
+                draft: {
+                  selected: incoming.room.draft.selectedCount,
+                  banned: incoming.room.draft.bannedCount,
+                  pool: incoming.room.draft.poolCardKeys.length,
+                  exchange: incoming.room.draft.exchangeCardKeys.length,
+                  opponentSelected: incoming.room.draft.opponentSelectedCount,
+                  opponentBanned: incoming.room.draft.opponentBannedCount,
+                },
+              })
+            }
+          }
           if (previousPhase === 'arrange' && incoming.room.phase !== 'arrange') {
             clearDragRef.current()
           }
@@ -357,11 +502,61 @@ export function OnlinePage() {
             setClaimsByPlayer({ A: null, B: null })
             setDraftSelection(new Set())
             setDraftBans(new Set())
-          } else if (incoming.room.phase === 'draft_select' && previousPhase !== 'draft_select') {
-            setDraftSelection(new Set(incoming.room.draft.selectedCardKeys))
-            setDraftBans(new Set())
-          } else if (incoming.room.phase === 'draft_ban' && previousPhase !== 'draft_ban') {
-            setDraftBans(new Set(incoming.room.draft.bannedCardKeys))
+            setDraftSubmit('idle')
+            draftConfirmedRef.current = ''
+          } else if (incoming.room.phase === 'draft_select') {
+            const draft = incoming.room.draft
+            if (previousPhase !== 'draft_select') {
+              const submitted = draft.selectedCardKeys.slice(0, DRAFT_SELECTION_SIZE)
+              const restored =
+                submitted.length === DRAFT_SELECTION_SIZE
+                  ? submitted
+                  : readStoredDraft(incoming.room.code, 'select', draft.poolCardKeys, DRAFT_SELECTION_SIZE)
+              setDraftSelection(new Set(restored))
+              setDraftBans(new Set())
+              setDraftSubmit('idle')
+              draftConfirmedRef.current = ''
+              pushOnlineDiag({
+                kind: 'draft',
+                event: 'pool',
+                phase: 'select',
+                room: incoming.room.code,
+                poolSize: draft.poolCardKeys.length,
+                restoredCount: restored.length,
+                serverCount: draft.selectedCount,
+              })
+            }
+            if (draft.selectedCount >= DRAFT_SELECTION_SIZE) {
+              draftConfirmedRef.current = draftSignature(draft.selectedCardKeys)
+              setDraftSubmit('confirmed')
+              pushOnlineDiag({ kind: 'draft', event: 'confirmed', phase: 'select', serverCount: draft.selectedCount })
+            }
+          } else if (incoming.room.phase === 'draft_ban') {
+            const draft = incoming.room.draft
+            if (previousPhase !== 'draft_ban') {
+              const submitted = draft.bannedCardKeys.slice(0, BAN_SIZE)
+              const restored =
+                submitted.length === BAN_SIZE
+                  ? submitted
+                  : readStoredDraft(incoming.room.code, 'ban', draft.exchangeCardKeys, BAN_SIZE)
+              setDraftBans(new Set(restored))
+              setDraftSubmit('idle')
+              draftConfirmedRef.current = ''
+              pushOnlineDiag({
+                kind: 'draft',
+                event: 'pool',
+                phase: 'ban',
+                room: incoming.room.code,
+                poolSize: draft.exchangeCardKeys.length,
+                restoredCount: restored.length,
+                serverCount: draft.bannedCount,
+              })
+            }
+            if (draft.bannedCount >= BAN_SIZE) {
+              draftConfirmedRef.current = draftSignature(draft.bannedCardKeys)
+              setDraftSubmit('confirmed')
+              pushOnlineDiag({ kind: 'draft', event: 'confirmed', phase: 'ban', serverCount: draft.bannedCount })
+            }
           }
           break
         case 'network':
@@ -390,6 +585,7 @@ export function OnlinePage() {
         case 'roundPrepare':
           clearBattleAnimations()
           audioReadySentRef.current = null
+          pushOnlineDiag({ kind: 'audio', event: 'roundPrepare', roundNo: incoming.roundNo, playId: incoming.playId })
           setRoundPreparation(incoming)
           setRound(null)
           setRoundRemaining(0)
@@ -401,6 +597,7 @@ export function OnlinePage() {
           break
         case 'roundStart':
           clearBattleAnimations()
+          pushOnlineDiag({ kind: 'audio', event: 'roundStart', roundNo: incoming.roundNo, playId: incoming.playId })
           setRoundPreparation(null)
           setRound(incoming)
           setLastResult(null)
@@ -487,6 +684,7 @@ export function OnlinePage() {
     const offStatus = socket.onStatus((nextConnected, reason) => {
       setConnected(nextConnected)
       setDisconnectReason(nextConnected ? null : reason || 'network')
+      pushOnlineDiag({ kind: 'session', event: nextConnected ? 'connected' : 'disconnected', reason: reason || null })
       if (!nextConnected) {
         audioReadySentRef.current = null
         matchAudioReadySentRef.current = null
@@ -502,12 +700,35 @@ export function OnlinePage() {
           reason === 'replaced' ? '此房间已在其他页面恢复连接，当前页面已停止重连' : previous || '连接已断开，正在尝试恢复对局…',
         )
       } else {
+        // The next room snapshot after a reconnect proves the seat was restored.
+        awaitingRoomRestoreRef.current = true
         setMessage((previous) =>
           previous === '连接已断开，正在尝试恢复对局…' || previous === '无法连接在线歌牌服务，请确认服务器已启动'
             ? null
             : previous,
         )
       }
+    })
+    const offResumeRejected = socket.onResumeRejected((reason) => {
+      // The server refused the persisted seat. Nothing on this page can operate
+      // the old match any more, so drop it and explain the reason in Chinese.
+      pushOnlineDiag({ kind: 'session', event: 'resume-rejected', reason })
+      phaseRef.current = null
+      roomRef.current = null
+      setRoom(null)
+      setRoundPreparation(null)
+      setRound(null)
+      setLastResult(null)
+      setMatchOver(null)
+      setMyClaim(null)
+      setOpponentClaim(null)
+      setClaimsByPlayer({ A: null, B: null })
+      setDraftSelection(new Set())
+      setDraftBans(new Set())
+      setDraftSubmit('idle')
+      draftConfirmedRef.current = ''
+      clearBattleAnimations()
+      setMessage(resumeRejectedMessage(reason))
     })
     void socket
       .connect()
@@ -516,6 +737,7 @@ export function OnlinePage() {
     return () => {
       offMessage()
       offStatus()
+      offResumeRejected()
       socket.close()
     }
   }, [clearBattleAnimations, showBattleAnimation, socket])
@@ -560,9 +782,12 @@ export function OnlinePage() {
     const role = audioRole
     const generation = audioGenerationRef.current + 1
     audioGenerationRef.current = generation
-    if (!source || !session || !audio) {
+    if (!source || !session || !audio || !connected) {
+      // Leaving the room, switching sources and dropping the socket all cancel
+      // the pending load/playback of the previous session.
       if (audio) audio.pause()
       setLocalAudioReady(false)
+      setAudioReadySession(null)
       setAudioStatus(audioUnlockedRef.current ? 'ready' : 'idle')
       return
     }
@@ -572,6 +797,7 @@ export function OnlinePage() {
     if (!attachedToSource) {
       setAudioStatus('loading')
       setLocalAudioReady(false)
+      setAudioReadySession(null)
       audio.pause()
     }
     let cancelled = false
@@ -609,6 +835,17 @@ export function OnlinePage() {
           await waitForMediaReady(audio)
           if (cancelled || generation !== audioGenerationRef.current) return
           setLocalAudioReady(true)
+          setAudioReadySession(session)
+          // Diagnostics stay token-free: they identify the session by role and
+          // round number instead of the audio endpoint URL.
+          pushOnlineDiag({
+            kind: 'audio',
+            event: 'ready',
+            role,
+            playId,
+            readyState: audio.readyState,
+            sourceFingerprint: shortFingerprint(source),
+          })
 
           const preparing = Boolean(roundPreparationRef.current && !roundRef.current)
           if (preparing) {
@@ -627,6 +864,7 @@ export function OnlinePage() {
           if (generation === audioGenerationRef.current) {
             audioUnlockedRef.current = true
             setAudioStatus('playing')
+            pushOnlineDiag({ kind: 'audio', event: 'playing', role: 'rest', sourceFingerprint: shortFingerprint(source) })
           }
         } catch (error: unknown) {
           if (generation !== audioGenerationRef.current) return
@@ -645,6 +883,7 @@ export function OnlinePage() {
           return
         }
         setLocalAudioReady(false)
+        setAudioReadySession(null)
         setAudioStatus('error')
         setMessage(error instanceof Error ? error.message : '音频预加载失败，请点击重试')
       }
@@ -655,16 +894,23 @@ export function OnlinePage() {
       cancelled = true
       audio.pause()
     }
-  }, [audioRetryNonce, audioRole, audioSession, audioSource, socket])
+  }, [audioRetryNonce, audioRole, audioSession, audioSource, connected, socket])
 
   useEffect(() => {
     const audio = audioRef.current
-    if (audioRole !== 'listen' || !round || !audio) return
+    if (audioRole !== 'listen' || !round || !audio || !connected) return
+    // Only the session whose audio actually finished loading may start
+    // playback, and the media element must still point at that exact source.
+    // Without this check a late spectator or a reconnect would jump the
+    // previous track (often the rest song) to this round's clock offset.
+    if (audioReadySession !== audioSession) return
+    const cached = localAudioUrlRef.current
+    if (!cached || cached.source !== round.audioUrl || !mediaHasUrl(audio, cached.url)) return
     let cancelled = false
     let playTimer: number | null = null
 
     const start = () => {
-      if (!localAudioReady && !isMediaPlayable(audio)) return
+      if (cancelled || audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return
       audio.muted = false
       audio.volume = onlineVolumeRef.current
       const localStart = socket.toLocalTime(round.startAtServerTime)
@@ -673,16 +919,40 @@ export function OnlinePage() {
         const elapsedMs = Math.max(0, Date.now() - localStart)
         if (elapsedMs > round.windowMs) return
         if (!syncRoundPlayback(audio, elapsedMs)) return
+        pushOnlineDiag({
+          kind: 'audio',
+          event: 'play',
+          role: 'listen',
+          playId,
+          elapsedMs,
+          sourceFingerprint: shortFingerprint(localAudioUrlRef.current?.source || ''),
+          mediaFingerprint: shortFingerprint(audio.currentSrc || audio.src),
+        })
         void audio
           .play()
           .then(() => {
             if (cancelled) return
             audioUnlockedRef.current = true
             setAudioStatus('playing')
+            pushOnlineDiag({
+              kind: 'audio',
+              event: 'playing',
+              role: 'listen',
+              playId,
+              currentTime: audio.currentTime,
+              sourceFingerprint: shortFingerprint(localAudioUrlRef.current?.source || ''),
+            })
           })
           .catch((error: unknown) => {
             if (cancelled) return
             setAudioStatus(error instanceof DOMException && error.name === 'NotAllowedError' ? 'blocked' : 'error')
+            pushOnlineDiag({
+              kind: 'audio',
+              event: 'play-error',
+              role: 'listen',
+              playId,
+              name: error instanceof DOMException ? error.name : 'unknown',
+            })
           })
       }, Math.max(0, localStart - Date.now()))
     }
@@ -693,14 +963,15 @@ export function OnlinePage() {
       if (playTimer !== null) window.clearTimeout(playTimer)
       audio.pause()
     }
-  }, [audioRole, localAudioReady, playId, round, socket])
+  }, [audioReadySession, audioRole, audioSession, connected, playId, round, socket])
 
   useEffect(() => {
     if (!connected || round || room?.spectator || !localAudioReady) return
+    if (audioReadySession !== audioSession) return
     const prepared = roundPreparation
     if (!prepared || !room?.you) return
     acknowledgeRoundAudio(socket, prepared.roundNo, prepared.audioUrl, audioReadySentRef)
-  }, [connected, localAudioReady, round, roundPreparation, room?.spectator, room?.you, socket])
+  }, [audioReadySession, audioSession, connected, localAudioReady, round, roundPreparation, room?.spectator, room?.you, socket])
 
   useEffect(() => {
     if (!connected || !matchAudio?.urls.length || room?.spectator || !room?.you) return
@@ -972,6 +1243,7 @@ export function OnlinePage() {
   }, [socket])
 
   const leaveRoom = useCallback(() => {
+    if (roomRef.current?.code) clearStoredDraft(roomRef.current.code)
     socket.send({ t: 'leaveRoom' })
     socket.clearResume()
     socket.clearNetworkSnapshot()
@@ -990,6 +1262,8 @@ export function OnlinePage() {
     setClaimsByPlayer({ A: null, B: null })
     setDraftSelection(new Set())
     setDraftBans(new Set())
+    setDraftSubmit('idle')
+    draftConfirmedRef.current = ''
     setBoardSlots(Array(MAX_HAND_SLOTS).fill(null))
     setPinnedKeys(new Set())
     setPinMode(false)
@@ -1064,12 +1338,28 @@ export function OnlinePage() {
 
   const submitDraftSelection = useCallback(() => {
     if (draftSelection.size !== DRAFT_SELECTION_SIZE) return
-    if (!socket.send({ t: 'selectCards', cardKeys: [...draftSelection] })) setMessage('连接已断开，选牌没有送达')
+    const keys = [...draftSelection]
+    if (!socket.send({ t: 'selectCards', cardKeys: keys })) {
+      setDraftSubmit('failed')
+      setMessage('连接已断开，选牌没有送达；连接恢复后可以重新提交')
+      pushOnlineDiag({ kind: 'draft', event: 'submit-failed', phase: 'select', count: keys.length })
+      return
+    }
+    setDraftSubmit('sending')
+    pushOnlineDiag({ kind: 'draft', event: 'submit', phase: 'select', count: keys.length })
   }, [draftSelection, socket])
 
   const submitDraftBan = useCallback(() => {
     if (draftBans.size !== BAN_SIZE) return
-    if (!socket.send({ t: 'banCards', cardKeys: [...draftBans] })) setMessage('连接已断开，BAN 没有送达')
+    const keys = [...draftBans]
+    if (!socket.send({ t: 'banCards', cardKeys: keys })) {
+      setDraftSubmit('failed')
+      setMessage('连接已断开，BAN 没有送达；连接恢复后可以重新提交')
+      pushOnlineDiag({ kind: 'draft', event: 'submit-failed', phase: 'ban', count: keys.length })
+      return
+    }
+    setDraftSubmit('sending')
+    pushOnlineDiag({ kind: 'draft', event: 'submit', phase: 'ban', count: keys.length })
   }, [draftBans, socket])
 
   const toggleDraftSelection = useCallback(
@@ -1080,6 +1370,67 @@ export function OnlinePage() {
     (cardKey: string) => toggleDraftCard(cardKey, BAN_SIZE, setDraftBans),
     [toggleDraftCard],
   )
+
+  // Tab-local draft persistence: a refresh mid-draft restores the same picks
+  // after the server re-sends the pool. The log records every accepted change
+  // so a browser run can prove the counter follows the actual clicks.
+  const previousDraftSelectionRef = useRef<Set<string>>(new Set())
+  const previousDraftBansRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const previous = previousDraftSelectionRef.current
+    if (previous === draftSelection) return
+    previousDraftSelectionRef.current = draftSelection
+    if (previous.size === draftSelection.size && [...draftSelection].every((key) => previous.has(key))) return
+    pushOnlineDiag({
+      kind: 'draft',
+      event: 'selection-change',
+      phase: 'select',
+      before: previous.size,
+      after: draftSelection.size,
+      added: [...draftSelection].filter((key) => !previous.has(key)),
+      removed: [...previous].filter((key) => !draftSelection.has(key)),
+    })
+  }, [draftSelection])
+
+  useEffect(() => {
+    const previous = previousDraftBansRef.current
+    if (previous === draftBans) return
+    previousDraftBansRef.current = draftBans
+    if (previous.size === draftBans.size && [...draftBans].every((key) => previous.has(key))) return
+    pushOnlineDiag({
+      kind: 'draft',
+      event: 'selection-change',
+      phase: 'ban',
+      before: previous.size,
+      after: draftBans.size,
+      added: [...draftBans].filter((key) => !previous.has(key)),
+      removed: [...previous].filter((key) => !draftBans.has(key)),
+    })
+  }, [draftBans])
+
+  useEffect(() => {
+    const code = room?.code
+    if (!code) return
+    if (room.phase === 'draft_select') writeStoredDraft(code, 'select', draftSelection)
+    else if (room.phase === 'draft_ban') writeStoredDraft(code, 'ban', draftBans)
+  }, [draftBans, draftSelection, room?.code, room?.phase])
+
+  useEffect(() => {
+    // Editing an already-confirmed pick is allowed until the phase advances,
+    // but the button must stop claiming the new set is submitted.
+    if (draftSubmit !== 'confirmed') return
+    const signature = draftSignature(room?.phase === 'draft_ban' ? draftBans : draftSelection)
+    if (signature !== draftConfirmedRef.current) setDraftSubmit('idle')
+  }, [draftBans, draftSelection, draftSubmit, room?.phase])
+
+  useEffect(() => {
+    if (draftSubmit !== 'sending') return
+    const timer = window.setTimeout(() => {
+      pushOnlineDiag({ kind: 'draft', event: 'submit-timeout', phase: roomRef.current?.phase || null })
+      setDraftSubmit((previous) => (previous === 'sending' ? 'failed' : previous))
+    }, DRAFT_SUBMIT_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [draftSubmit])
 
   const togglePinned = useCallback((cardKey: string) => {
     setPinnedKeys((previous) => {
@@ -1356,6 +1707,7 @@ export function OnlinePage() {
         room={room}
         cards={draftPoolCards}
         selected={draftSelection}
+        submitState={draftSubmit}
         canReconnect={canReconnect}
         onReconnect={reconnectNow}
         onLeave={leaveRoom}
@@ -1372,6 +1724,7 @@ export function OnlinePage() {
         room={room}
         cards={draftExchangeCards}
         selected={draftBans}
+        submitState={draftSubmit}
         canReconnect={canReconnect}
         onReconnect={reconnectNow}
         onLeave={leaveRoom}

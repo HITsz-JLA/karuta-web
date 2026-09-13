@@ -2,6 +2,7 @@ import type { OnlinePlayerId } from '../../lib/onlineProtocol'
 
 export type AudioStatus = 'idle' | 'ready' | 'loaded' | 'loading' | 'playing' | 'blocked' | 'error'
 export type BattleStyle = 'text' | 'card'
+export type OnlineDraftSubmitState = 'idle' | 'sending' | 'confirmed' | 'failed'
 
 export interface ClaimState {
   cardKey: string

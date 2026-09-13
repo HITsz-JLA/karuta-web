@@ -27,10 +27,22 @@ const ROUND_WINDOW_MS = 10_000
 // browsers can start the same playId from the beginning together.
 const ROUND_SYNC_LEAD_MS = 2_000
 const ROOM_TTL_MS = 30 * 60 * 1000
-const RESUME_TTL_MS = 90 * 1000
+// How long a seat can be restored after its socket actually drops. The window
+// starts on disconnect, so a player who stays online keeps a valid credential
+// no matter how long the match runs.
+export const RESUME_TTL_MS = 90 * 1000
 const MAX_SPECTATORS = 32
 const MAX_MESSAGE_BYTES = 1024 * 1024
 const AUDIO_EXTENSIONS = new Set(['.aac', '.aif', '.aiff', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
+
+// Structured reasons so clients can explain a failed restore instead of
+// silently dropping back to the lobby.
+const RESUME_REASON = {
+  sessionAlreadyBound: 'session_already_bound',
+  invalidOrExpired: 'invalid_or_expired',
+  seatMissing: 'seat_missing',
+  seatOccupied: 'seat_occupied',
+}
 
 export const NETWORK_MIN_SAMPLES = 3
 export const NETWORK_MAX_RTT_GAP_MS = 80
@@ -312,6 +324,28 @@ export class OnlineRoomManager {
   }
 
   hello(session, resumeToken) {
+    // A client can repeat hello on the same connection when the response to its
+    // first resume was lost on a flaky link. Re-sending the authoritative state
+    // for the very same seat is idempotent, so treat it as a successful resume
+    // instead of rejecting the still-valid session.
+    if (
+      session.room &&
+      session.playerId &&
+      typeof resumeToken === 'string' &&
+      resumeToken &&
+      session.resumeToken === resumeToken
+    ) {
+      logOnlineEvent('resume.repeated', {
+        sessionId: session.id,
+        room: session.room.code,
+        playerId: session.playerId,
+      })
+      this.send(session, { t: 'welcome', resumed: true, resumeToken })
+      session.room.touch()
+      session.room.networkChanged(true)
+      session.room.sendCurrentState(session)
+      return
+    }
     // A socket that already belongs to a room must never be rebound through a
     // resume token. In particular, a spectator must not be able to present a
     // player's token and become an input-capable session in the same room.
@@ -321,30 +355,30 @@ export class OnlineRoomManager {
         sessionId: session.id,
         room: session.room?.code,
       })
-      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+      this.rejectResume(session, RESUME_REASON.sessionAlreadyBound)
       return
     }
     if (typeof resumeToken !== 'string' || !resumeToken) return
     const record = this.resumeIndex.get(resumeToken)
-    if (!record || record.expiresAt < Date.now()) {
+    if (!record || (record.expiresAt !== null && record.expiresAt < Date.now())) {
       this.resumeIndex.delete(resumeToken)
       logOnlineEvent('resume.rejected', {
         reason: 'invalid_or_expired',
         sessionId: session.id,
         room: record?.room?.code,
       })
-      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+      this.rejectResume(session, RESUME_REASON.invalidOrExpired)
       return
     }
     const seat = record.room.seats[record.playerId]
-    if (!seat) {
+    if (!seat || seat.resumeToken !== resumeToken) {
       logOnlineEvent('resume.rejected', {
         reason: 'seat_missing',
         sessionId: session.id,
         room: record.room.code,
         playerId: record.playerId,
       })
-      this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+      this.rejectResume(session, RESUME_REASON.seatMissing)
       return
     }
     let replacedSessionId
@@ -370,7 +404,7 @@ export class OnlineRoomManager {
           room: record.room.code,
           playerId: record.playerId,
         })
-        this.send(session, { t: 'welcome', resumed: false, resumeRejected: true })
+        this.rejectResume(session, RESUME_REASON.seatOccupied)
         return
       }
     }
@@ -379,7 +413,9 @@ export class OnlineRoomManager {
     session.resumeToken = resumeToken
     seat.socket = session
     seat.disconnectedAt = null
-    record.expiresAt = Date.now() + RESUME_TTL_MS
+    // The player is online again: the credential stays valid until the next
+    // actual disconnect.
+    record.expiresAt = null
     logOnlineEvent('resume.accepted', {
       sessionId: session.id,
       replacedSessionId,
@@ -551,11 +587,27 @@ export class OnlineRoomManager {
     session.room = room
     session.playerId = playerId
     session.resumeToken = resumeToken
-    this.resumeIndex.set(resumeToken, { room, playerId, expiresAt: Date.now() + RESUME_TTL_MS })
+    // expiresAt === null means "seat is online"; the 90s restore window is
+    // armed only when the socket actually drops.
+    this.resumeIndex.set(resumeToken, { room, playerId, expiresAt: null })
     logOnlineEvent('seat.joined', { room: room.code, playerId, sessionId: session.id })
     this.send(session, { t: 'welcome', resumed: false, resumeToken })
     room.touch()
     room.sendRoom()
+  }
+
+  rejectResume(session, reason) {
+    this.send(session, { t: 'welcome', resumed: false, resumeRejected: true, resumeReason: reason })
+  }
+
+  /**
+   * Arm the restore window from the moment a socket drops. Called by the room
+   * when a seat loses its socket.
+   */
+  armResumeExpiry(seat) {
+    if (!seat?.resumeToken) return
+    const record = this.resumeIndex.get(seat.resumeToken)
+    if (record) record.expiresAt = (seat.disconnectedAt || Date.now()) + RESUME_TTL_MS
   }
 
   leave(session) {
@@ -617,7 +669,13 @@ export class OnlineRoomManager {
   cleanup() {
     const now = Date.now()
     for (const [token, record] of this.resumeIndex) {
-      if (record.expiresAt < now) this.resumeIndex.delete(token)
+      const seat = record.room?.seats?.[record.playerId]
+      if (!seat || seat.resumeToken !== token) {
+        // A credential without a matching seat must never restore a player.
+        this.resumeIndex.delete(token)
+        continue
+      }
+      if (record.expiresAt !== null && record.expiresAt < now) this.resumeIndex.delete(token)
     }
     for (const room of [...this.rooms.values()]) {
       if (now - room.lastActivity > ROOM_TTL_MS) this.dropRoom(room)
@@ -1433,6 +1491,7 @@ class OnlineRoom {
     let audioReadyChanged = false
     seat.socket = null
     seat.disconnectedAt = Date.now()
+    this.manager.armResumeExpiry(seat)
     logOnlineEvent('player.disconnected', {
       room: this.code,
       playerId,
@@ -1959,7 +2018,11 @@ function normalizeCards(input) {
   const keys = new Set()
   const cards = []
   for (const raw of input) {
-    const key = sanitizeText(raw?.key, 240)
+    // Card keys are opaque identifiers taken from the package metadata and are
+    // used again when the card image or audio is looked up in the catalog.
+    // Whitespace normalisation here would silently stop matching the catalog
+    // (for example a key containing an ideographic space).
+    const key = sanitizeKey(raw?.key, 240)
     const workName = sanitizeText(raw?.workName, 120)
     const imageName = sanitizeFileName(raw?.imageName, 255)
     const imagePath = safeRelativePath(raw?.imagePath)
@@ -1997,6 +2060,18 @@ function sanitizeText(value, maxLength) {
     })
     .join('')
     .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+}
+
+/** Identifier-safe sanitisation: strip control characters, keep the text as-is. */
+function sanitizeKey(value, maxLength) {
+  return [...String(value || '')]
+    .filter((character) => {
+      const code = character.charCodeAt(0)
+      return code >= 0x20 && code !== 0x7f
+    })
+    .join('')
     .trim()
     .slice(0, maxLength)
 }
