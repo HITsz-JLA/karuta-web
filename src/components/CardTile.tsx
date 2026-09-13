@@ -36,6 +36,8 @@ export const CardTile = memo(function CardTile({ card, selected, onClick, onTogg
       type="button"
       className={`card-tile${selected ? ' selected' : ''}`}
       onClick={handleClick}
+      aria-pressed={onToggle ? selected : undefined}
+      aria-label={`#${card.number} ${card.workName}，${card.songs.length} 首${selected ? '，已选' : ''}`}
     >
       <span className="num-badge">#{card.number}</span>
       {selected ? <span className="check-badge">✓</span> : null}
@@ -45,6 +47,7 @@ export const CardTile = memo(function CardTile({ card, selected, onClick, onTogg
         ) : card.imageBlobKey ? null : (
           <div className="empty-state small">无图片</div>
         )}
+        {card.imageBlobKey && !url ? <span className="thumb-skeleton" aria-hidden="true" /> : null}
       </div>
       <div className="title">{card.workName}</div>
       {showSongCount ? <div className="muted small">{card.songs.length} 首</div> : null}

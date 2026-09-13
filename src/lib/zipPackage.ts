@@ -81,6 +81,7 @@ export async function importDeckZip(
   preferredName?: string,
   onProgress?: ImportProgressHandler,
   preferredMode?: PackageMode,
+  sourcePackageId?: string,
 ): Promise<DeckRecord> {
   onProgress?.({ stage: 'reading', current: 0, total: 1, fileName: file.name })
   const zip = await JSZip.loadAsync(file)
@@ -211,6 +212,7 @@ export async function importDeckZip(
       name: deckName,
       updatedAt: Date.now(),
       cards,
+      ...(sourcePackageId ? { sourcePackageId } : {}),
     }
 
     await saveDeck(deck)

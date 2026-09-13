@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useDeck, useDeckList } from '../hooks/useDecks'
+import { VirtualWorkList } from '../components/VirtualWorkList'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { cardsToCsv, withBom } from '../lib/csv'
 import { buildPrintableCards, downloadBlob, exportPrintPdf } from '../lib/printPdf'
@@ -61,7 +62,8 @@ export function EditorPage() {
   }, [deck, draft?.id, editingId])
 
   const previewUrl = useObjectUrl(draft?.imageBlobKey)
-  const sortedCards = useMemo(() => deck?.cards || [], [deck])
+  const sortedCards = deck?.cards || []
+  const selectCard = useCallback((card: CardEntry) => setEditingId(card.id), [])
 
   async function saveCurrent() {
     if (!deck || !draft || busy) return
@@ -294,23 +296,11 @@ export function EditorPage() {
               新建作品
             </button>
           </div>
-          <div className="works-list">
-            {sortedCards.map((card) => (
-              <button
-                key={card.id}
-                type="button"
-                className={`work-item${card.id === editingId ? ' active' : ''}`}
-                onClick={() => setEditingId(card.id)}
-              >
-                <span className="num">#{card.number}</span>
-                <span>
-                  <strong>{card.workName || '未命名'}</strong>
-                  <div className="muted small">{card.songs.length} 首</div>
-                </span>
-              </button>
-            ))}
-            {!sortedCards.length ? <div className="empty-state">还没有作品</div> : null}
-          </div>
+          {sortedCards.length ? (
+            <VirtualWorkList cards={sortedCards} selectedId={editingId} onSelect={selectCard} />
+          ) : (
+            <div className="empty-state">还没有作品</div>
+          )}
         </section>
 
         <section className="panel cool stack">

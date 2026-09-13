@@ -251,6 +251,15 @@ export class OnlineRoomManager {
 
   async getPackageCatalog(packageId) {
     if (!CURATED_PACKAGE_IDS.has(packageId)) return null
+    return this.loadPackageCatalog(packageId)
+  }
+
+  async getPreviewCatalog(packageId) {
+    return this.loadPackageCatalog(packageId)
+  }
+
+  async loadPackageCatalog(packageId) {
+    if (!safePackageId(packageId)) return null
     const packagePath = path.join(this.dataDir, packageId)
     try {
       return await loadPackageCatalog(packagePath, packageId)
@@ -266,6 +275,27 @@ export class OnlineRoomManager {
     if (!card) return null
     const packagePath = path.join(this.dataDir, packageId)
     return readZipAsset(packagePath, card.imagePath, card.imageName, 'image')
+  }
+
+  async getPreviewCardImage(packageId, cardKey) {
+    const catalog = await this.getPreviewCatalog(packageId)
+    const card = catalog && findCatalogCard(catalog, cardKey)
+    if (!card) return null
+    const packagePath = path.join(this.dataDir, packageId)
+    return readZipAsset(packagePath, card.imagePath, card.imageName, 'image')
+  }
+
+  async getPreviewAudio(packageId, cardKey, songIndex) {
+    const catalog = await this.getPreviewCatalog(packageId)
+    const card = catalog && findCatalogCard(catalog, cardKey)
+    const index = Number(songIndex)
+    if (!card || !Number.isSafeInteger(index) || index < 0 || index >= card.songs.length) return null
+    const song = card.songs[index]
+    return {
+      packagePath: path.join(this.dataDir, packageId),
+      sourcePath: song.sourcePath,
+      fileName: song.fileName,
+    }
   }
 
   dispose() {

@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useDeck, useDeckList, useSettings } from '../hooks/useDecks'
 import { HomeNowPlaying } from '../components/HomeNowPlaying'
+import { VirtualWorkList } from '../components/VirtualWorkList'
 import { useObjectUrl } from '../hooks/useObjectUrl'
 import { createId, saveDeck } from '../lib/storage'
 import type { ImportProgress } from '../lib/zipPackage'
@@ -13,79 +14,6 @@ import {
   type ServerPackage,
 } from '../lib/serverPackages'
 import type { CardEntry, FailureMode } from '../types/models'
-
-const HOME_WORK_ROW_HEIGHT = 64
-const HOME_WORK_VIEWPORT_HEIGHT = 640
-
-interface HomeWorkListProps {
-  cards: CardEntry[]
-  selectedIndex: number
-  onSelect: (index: number) => void
-}
-
-const HomeWorkItem = memo(function HomeWorkItem({
-  card,
-  index,
-  selected,
-  onSelect,
-}: {
-  card: CardEntry
-  index: number
-  selected: boolean
-  onSelect: (index: number) => void
-}) {
-  const handleClick = useCallback(() => onSelect(index), [index, onSelect])
-  return (
-    <button type="button" className={`work-item${selected ? ' active' : ''}`} onClick={handleClick}>
-      <span className="num">#{card.number}</span>
-      <span>
-        <strong>{card.workName}</strong>
-        <div className="muted small">{card.songs.length} 首</div>
-      </span>
-    </button>
-  )
-})
-
-/** Keeps large local decks scrollable without mounting every work row at once. */
-function HomeWorkList({ cards, selectedIndex, onSelect }: HomeWorkListProps) {
-  const scrollTopRef = useRef(0)
-  const scrollFrameRef = useRef<number | null>(null)
-  const [scrollTop, setScrollTop] = useState(0)
-
-  useEffect(() => {
-    return () => {
-      if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current)
-    }
-  }, [])
-
-  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    scrollTopRef.current = event.currentTarget.scrollTop
-    if (scrollFrameRef.current !== null) return
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null
-      setScrollTop(scrollTopRef.current)
-    })
-  }, [])
-
-  const firstIndex = Math.max(0, Math.floor(scrollTop / HOME_WORK_ROW_HEIGHT) - 3)
-  const lastIndex = Math.min(
-    cards.length,
-    Math.ceil((scrollTop + HOME_WORK_VIEWPORT_HEIGHT) / HOME_WORK_ROW_HEIGHT) + 3,
-  )
-
-  return (
-    <div className="works-list works-list-virtualized" onScroll={handleScroll} aria-label={`作品列表，共 ${cards.length} 张卡牌`}>
-      <div className="works-list-canvas" style={{ height: `${cards.length * HOME_WORK_ROW_HEIGHT}px` }}>
-        <div className="works-list-window" style={{ top: `${firstIndex * HOME_WORK_ROW_HEIGHT}px` }}>
-          {cards.slice(firstIndex, lastIndex).map((card, offset) => {
-            const index = firstIndex + offset
-            return <HomeWorkItem key={card.id} card={card} index={index} selected={index === selectedIndex} onSelect={onSelect} />
-          })}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
@@ -112,7 +40,7 @@ export function HomePage() {
   const [previewIndex, setPreviewIndex] = useState(0)
   const [serverPackages, setServerPackages] = useState<ServerPackage[]>([])
   const [packagesLoading, setPackagesLoading] = useState(true)
-  const selectPreview = useCallback((index: number) => setPreviewIndex(index), [])
+  const selectPreview = useCallback((_card: CardEntry, index: number) => setPreviewIndex(index), [])
   const updateVolume = useCallback((volume: number) => void update({ volume }), [update])
 
   useEffect(() => {
@@ -185,12 +113,11 @@ export function HomePage() {
         serverPackage.name,
         (progress) => setImportProgress(progress),
         serverPackage.mode,
+        serverPackage.id,
       )
-      const synced = { ...imported, sourcePackageId: serverPackage.id }
-      await saveDeck(synced)
       await refresh()
-      setSelectedId(synced.id)
-      setMessage(`已导入：${synced.name}`)
+      setSelectedId(imported.id)
+      setMessage(`已导入：${imported.name}`)
     } catch (error) {
       setMessage(readableImportError(error))
     } finally {
@@ -330,14 +257,22 @@ export function HomePage() {
                           {formatBytes(serverPackage.size)} · {serverPackage.mode === 'full' ? '完整包' : '精简包'}
                         </small>
                       </div>
-                      <button
-                        className="btn btn-primary"
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void loadServerPackage(serverPackage)}
-                      >
-                        {loaded ? '重新导入本地' : '导入本地'}
-                      </button>
+                      <div className="muca-package-actions">
+                        <Link
+                          className="btn btn-ghost btn-small"
+                          to={`/preview/${encodeURIComponent(serverPackage.id)}`}
+                        >
+                          查看曲库
+                        </Link>
+                        <button
+                          className="btn btn-primary"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void loadServerPackage(serverPackage)}
+                        >
+                          {loaded ? '重新导入本地' : '导入本地'}
+                        </button>
+                      </div>
                     </article>
                   )
                 })}
@@ -466,10 +401,10 @@ export function HomePage() {
             </span>
           </div>
 
-          <HomeWorkList
+          <VirtualWorkList
             key={selectedId || 'empty-deck'}
             cards={deck?.cards || []}
-            selectedIndex={previewIndex}
+            selectedId={previewCard?.id}
             onSelect={selectPreview}
           />
         </section>

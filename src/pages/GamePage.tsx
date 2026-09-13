@@ -60,6 +60,12 @@ export function GamePage() {
     () => snap?.results.filter((item) => item === 'FAILURE').length || 0,
     [snap],
   )
+  const totalRounds = snap?.totalRounds || 0
+  const completedRounds = snap?.results.length || 0
+  const remainingRealCards = useMemo(
+    () => snap?.activeCards.filter((card) => !card.emptyCard).length || 0,
+    [snap],
+  )
   const successRate = snap?.results.length
     ? Math.round((successCount / snap.results.length) * 100)
     : 0
@@ -98,6 +104,32 @@ export function GamePage() {
       snap.roundState === 'REST_MUSIC' ||
       snap.roundState === 'ROUND_COMPLETE')
 
+  useEffect(() => {
+    function handleShortcut(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
+      const key = event.key.toLowerCase()
+      if ((key === ' ' || key === 'enter') && canPrepare) {
+        event.preventDefault()
+        if (snap?.roundState === 'REST_MUSIC') engine.toggleRestMusic()
+        else engine.prepareNextRound()
+        return
+      }
+      if ((key === 's' || key === '1') && canJudge) {
+        event.preventDefault()
+        engine.submitResult('SUCCESS')
+        return
+      }
+      if ((key === 'f' || key === '2') && canJudge && !snap?.currentCard?.emptyCard) {
+        event.preventDefault()
+        engine.submitResult('FAILURE')
+      }
+    }
+
+    window.addEventListener('keydown', handleShortcut)
+    return () => window.removeEventListener('keydown', handleShortcut)
+  }, [canJudge, canPrepare, engine, snap?.currentCard?.emptyCard, snap?.roundState])
+
   if (loading || !ready) return <div className="empty-state">加载对局…</div>
 
   return (
@@ -105,10 +137,10 @@ export function GamePage() {
       <section className="hero">
         <div className="row spread">
           <div>
-            <h1>对战中</h1>
+            <span className="eyebrow">OFFLINE MATCH</span>
+            <h1>线下歌牌对战</h1>
             <p>
-              已进行 {snap?.currentRound || 0} · 剩余实牌{' '}
-              {snap?.activeCards.filter((card) => !card.emptyCard).length || 0}
+              第 {snap?.currentRound || 0} / {totalRounds} 回合 · 剩余实牌 {remainingRealCards}
             </p>
           </div>
           <div className="stat-chips">
@@ -118,9 +150,20 @@ export function GamePage() {
             <span className="chip">在场 {snap?.activeCards.length || 0}</span>
           </div>
         </div>
+        <div className="game-progress" aria-label="对局进度">
+          <div className="row spread small">
+            <span>本地牌局进度</span>
+            <strong>{completedRounds} / {totalRounds} 已结算</strong>
+          </div>
+          <div className="progress-track">
+            <span style={{ width: `${totalRounds ? Math.min(100, (completedRounds / totalRounds) * 100) : 0}%` }} />
+          </div>
+        </div>
       </section>
 
-      <div className={`status-banner${snap?.error ? ' warn' : ''}`}>{snap?.error || statusText}</div>
+      <div className={`status-banner${snap?.error ? ' warn' : ''}`} role="status" aria-live="polite">
+        {snap?.error || statusText}
+      </div>
 
       <div className="field" style={{ margin: '14px 0' }}>
         <label htmlFor="volume">音量 {Math.round(settings.volume * 100)}%</label>
@@ -140,8 +183,11 @@ export function GamePage() {
 
       <div className="game-layout">
         <section className="panel warm stack">
-          <strong>卡面</strong>
-          <div className="preview-art">
+          <div className="row spread">
+            <strong>本回合卡面</strong>
+            <span className="muted small">先听曲，再判定</span>
+          </div>
+          <div className="preview-art game-card-art">
             {imageUrl ? (
               <img src={imageUrl} alt={snap?.currentCard?.workName || ''} />
             ) : (
@@ -177,7 +223,7 @@ export function GamePage() {
               disabled={!canPrepare || snap?.roundState === 'GAME_OVER'}
               onClick={() => engine.prepareNextRound()}
             >
-              {snap?.currentRound === 0 ? '准备' : '准备下一回合'}
+              {snap?.roundState === 'REST_MUSIC' ? '进入下一回合' : snap?.currentRound === 0 ? '准备开始' : '准备下一回合'}
             </button>
             <button
               className="btn btn-primary btn-lg"
@@ -185,7 +231,7 @@ export function GamePage() {
               disabled={!canJudge}
               onClick={() => engine.submitResult('SUCCESS')}
             >
-              Success
+              答对 <span className="shortcut-key">S / 1</span>
             </button>
             <button
               className="btn btn-danger btn-lg"
@@ -193,7 +239,7 @@ export function GamePage() {
               disabled={!canJudge || Boolean(snap?.currentCard?.emptyCard)}
               onClick={() => engine.submitResult('FAILURE')}
             >
-              Failure
+              答错 <span className="shortcut-key">F / 2</span>
             </button>
             {snap?.roundState === 'REST_MUSIC' ? (
               <button className="btn btn-secondary btn-lg" type="button" onClick={() => engine.toggleRestMusic()}>
@@ -216,6 +262,7 @@ export function GamePage() {
               结束并返回
             </button>
           </div>
+          <p className="muted small game-shortcut-hint">快捷键：Space / Enter 准备，S 或 1 答对，F 或 2 答错。</p>
         </section>
 
         <section className="panel queue-panel stack">

@@ -268,9 +268,9 @@ app.get('/api/packages', async (_request, response, next) => {
 
 app.get('/api/packages/:id/catalog', async (request, response, next) => {
   try {
-    const catalog = await onlineRooms.getPackageCatalog(request.params.id)
+    const catalog = await onlineRooms.getPreviewCatalog(request.params.id)
     if (!catalog) {
-      response.status(404).json({ message: '在线牌组不存在' })
+      response.status(404).json({ message: '牌组不存在或目录无效' })
       return
     }
     const cached = catalogResponseCache.get(catalog) || buildCatalogResponse(catalog)
@@ -285,7 +285,7 @@ app.get('/api/packages/:id/catalog', async (request, response, next) => {
 app.get('/api/packages/:id/card-image', async (request, response, next) => {
   try {
     const cardKey = typeof request.query.cardKey === 'string' ? request.query.cardKey : ''
-    const image = await onlineRooms.getPackageCardImage(request.params.id, cardKey)
+    const image = await onlineRooms.getPreviewCardImage(request.params.id, cardKey)
     if (!image) {
       response.status(404).json({ message: '歌牌卡面不存在' })
       return
@@ -297,6 +297,50 @@ app.get('/api/packages/:id/card-image', async (request, response, next) => {
   } catch (error) {
     if (error?.code === 'ENOENT') {
       response.status(404).json({ message: '歌牌卡面资源不存在' })
+      return
+    }
+    next(error)
+  }
+})
+
+app.get('/api/packages/:id/preview-audio', async (request, response, next) => {
+  try {
+    const cardKey = typeof request.query.cardKey === 'string' ? request.query.cardKey : ''
+    const songIndexText = typeof request.query.songIndex === 'string' ? request.query.songIndex : ''
+    if (!cardKey || !/^\d+$/.test(songIndexText)) {
+      response.status(400).json({ message: '试听曲目参数无效' })
+      return
+    }
+    const audio = await onlineRooms.getPreviewAudio(request.params.id, cardKey, Number(songIndexText))
+    if (!audio) {
+      response.status(404).json({ message: '试听曲目不存在' })
+      return
+    }
+
+    const media = await readZipAssetRange(audio.packagePath, audio.sourcePath, audio.fileName, request.headers.range)
+    const range = media.range
+    const totalBytes = media.totalBytes
+    response.setHeader('Content-Type', audioMime(media.name || audio.fileName))
+    response.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate')
+    response.setHeader('Accept-Ranges', 'bytes')
+    if (range?.invalid) {
+      response.status(416)
+      response.setHeader('Content-Range', `bytes */${totalBytes}`)
+      response.end()
+      return
+    }
+    if (range) {
+      response.status(206)
+      response.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${totalBytes}`)
+      response.setHeader('Content-Length', String(media.data.byteLength))
+      response.send(media.data)
+      return
+    }
+    response.setHeader('Content-Length', String(totalBytes))
+    response.send(media.data)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      response.status(404).json({ message: '试听音频资源不存在' })
       return
     }
     next(error)
@@ -493,6 +537,7 @@ function buildCatalogResponse(catalog) {
         imageName,
         workName,
         songCount: songs.length,
+        songs: songs.map(({ fileName, displayName }) => ({ fileName, displayName })),
       })),
     },
   })
