@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { test } from 'node:test'
+import { mock, test } from 'node:test'
 import JSZip from 'jszip'
-import { MATCH_AUDIO_PRELOAD_LIMIT, OnlineRoomManager } from './onlineRooms.mjs'
+import { MATCH_AUDIO_PRELOAD_LIMIT, OnlineRoomManager, RESUME_TTL_MS } from './onlineRooms.mjs'
 
 class FakeSocket {
   readyState = 1
@@ -30,6 +30,21 @@ async function writeCatalogPackage(directory, count = 60, songsPerCard = 1) {
       rows.push(`anime,${index},作品${index},${songIndex},歌曲${songId},${songId}.mp3,mp3_files/seg_30/anime/${songId}.mp3,${index}.jpg,images/${index}.jpg`)
       zip.file(`mp3_files/seg_30/anime/${songId}.mp3`, Buffer.from(`audio-${songId}`))
     }
+    zip.file(`images/${index}.jpg`, Buffer.from(`image-${index}`))
+  }
+  const packageId = 'jla-muca-anime-lite.zip'
+  zip.file('meta/metadata.csv', rows.join('\n'))
+  await writeFile(path.join(directory, packageId), await zip.generateAsync({ type: 'nodebuffer' }))
+  return packageId
+}
+
+async function writeCatalogPackageWithWideSpace(directory, count = 60) {
+  const zip = new JSZip()
+  const rows = ['category,work_number,work_name,song_slot,song_title,audio_file,audio_path,cover_files,cover_paths']
+  for (let index = 1; index <= count; index += 1) {
+    const workName = index === 1 ? 'マブラヴ　オルタネイティヴ' : `作品${index}`
+    rows.push(`anime,${index},${workName},1,歌曲${index},${index}.mp3,mp3_files/seg_30/anime/${index}.mp3,${index}.jpg,images/${index}.jpg`)
+    zip.file(`mp3_files/seg_30/anime/${index}.mp3`, Buffer.from(`audio-${index}`))
     zip.file(`images/${index}.jpg`, Buffer.from(`image-${index}`))
   }
   const packageId = 'jla-muca-anime-lite.zip'
@@ -638,6 +653,152 @@ test('invalid resume tokens are rejected so clients can return to the lobby', as
     const welcome = latest(socket, 'welcome')
     assert.equal(welcome.resumed, false)
     assert.equal(welcome.resumeRejected, true)
+    assert.equal(welcome.resumeReason, 'invalid_or_expired')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('an online seat keeps its resume credential past the restore window', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-online-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    assert.ok(resumeToken)
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    mock.timers.enable({ apis: ['Date'] })
+    try {
+      // The credential is armed by a real disconnect, not by the seat creation.
+      assert.equal(manager.resumeIndex.get(resumeToken).expiresAt, null)
+      mock.timers.tick(RESUME_TTL_MS + 5_000)
+      manager.cleanup()
+      assert.equal(manager.resumeIndex.has(resumeToken), true)
+
+      // After 95 online seconds a refresh must still restore seat A, even when
+      // the previous socket has not finished closing yet.
+      const replacementSocket = new FakeSocket()
+      const replacement = manager.connect(replacementSocket)
+      await manager.handle(replacement, JSON.stringify({ t: 'hello', resumeToken }))
+      assert.equal(latest(replacementSocket, 'welcome').resumed, true)
+      assert.equal(latest(replacementSocket, 'room').room.you, 'A')
+      const room = [...manager.rooms.values()][0]
+      assert.equal(room.seats.A.socket, replacement)
+      assert.equal(room.seats.A.disconnectedAt, null)
+      assert.equal(manager.resumeIndex.get(resumeToken).expiresAt, null)
+
+      // Now the window really starts: 90 seconds from the disconnect.
+      manager.disconnect(replacement)
+      const record = manager.resumeIndex.get(resumeToken)
+      assert.equal(typeof record.expiresAt, 'number')
+      assert.ok(record.expiresAt - Date.now() <= RESUME_TTL_MS)
+      mock.timers.tick(RESUME_TTL_MS + 1_000)
+      manager.cleanup()
+      assert.equal(manager.resumeIndex.has(resumeToken), false)
+      assert.equal(room.seats.A, null)
+
+      const lateSocket = new FakeSocket()
+      const late = manager.connect(lateSocket)
+      await manager.handle(late, JSON.stringify({ t: 'hello', resumeToken }))
+      const welcome = latest(lateSocket, 'welcome')
+      assert.equal(welcome.resumeRejected, true)
+      assert.equal(welcome.resumeReason, 'invalid_or_expired')
+    } finally {
+      mock.timers.reset()
+    }
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('a repeated hello on the same connection re-sends the resumed room state', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-repeat-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    manager.disconnect(host)
+    const resumedSocket = new FakeSocket()
+    const resumed = manager.connect(resumedSocket)
+    await manager.handle(resumed, JSON.stringify({ t: 'hello', resumeToken }))
+    assert.equal(latest(resumedSocket, 'welcome').resumed, true)
+    const roomMessages = resumedSocket.messages.filter((message) => message.t === 'room').length
+
+    // A dropped hello response must be recoverable: the client repeats hello on
+    // the very same still-open connection.
+    await manager.handle(resumed, JSON.stringify({ t: 'hello', resumeToken }))
+    const repeatWelcome = latest(resumedSocket, 'welcome')
+    assert.equal(repeatWelcome.resumed, true)
+    assert.equal(repeatWelcome.resumeRejected, undefined)
+    assert.ok(resumedSocket.messages.filter((message) => message.t === 'room').length > roomMessages)
+    assert.equal(manager.sessions.get(resumedSocket).playerId, 'A')
+
+    // A different credential must still be refused on a bound connection.
+    await manager.handle(resumed, JSON.stringify({ t: 'hello', resumeToken: 'some-other-token' }))
+    const rejection = latest(resumedSocket, 'welcome')
+    assert.equal(rejection.resumeRejected, true)
+    assert.equal(rejection.resumeReason, 'session_already_bound')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('resume rejections carry structured reasons and leaving deletes the credential', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-resume-reason-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackage(temp)
+    const hostSocket = new FakeSocket()
+    const guestSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    const guest = manager.connect(guestSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const created = latest(hostSocket, 'room')
+    const resumeToken = latest(hostSocket, 'welcome').resumeToken
+    assert.ok(resumeToken)
+    await manager.handle(guest, JSON.stringify({ t: 'joinRoom', code: created.room.code, nickname: 'guest' }))
+
+    // A connection that is already bound to a room must not be rebound through
+    // another seat's credential.
+    await manager.handle(guest, JSON.stringify({ t: 'hello', resumeToken }))
+    const boundWelcome = latest(guestSocket, 'welcome')
+    assert.equal(boundWelcome.resumeRejected, true)
+    assert.equal(boundWelcome.resumeReason, 'session_already_bound')
+    assert.equal(manager.sessions.get(guestSocket).playerId, 'B')
+
+    // An unknown credential is reported as invalid/expired.
+    const strangerSocket = new FakeSocket()
+    const stranger = manager.connect(strangerSocket)
+    await manager.handle(stranger, JSON.stringify({ t: 'hello', resumeToken: 'not-a-real-token' }))
+    assert.equal(latest(strangerSocket, 'welcome').resumeReason, 'invalid_or_expired')
+
+    // Leaving on purpose throws the credential away instead of parking it.
+    await manager.handle(host, JSON.stringify({ t: 'leaveRoom' }))
+    assert.equal(manager.resumeIndex.has(resumeToken), false)
+    const afterLeaveSocket = new FakeSocket()
+    const afterLeave = manager.connect(afterLeaveSocket)
+    await manager.handle(afterLeave, JSON.stringify({ t: 'hello', resumeToken }))
+    const afterLeaveWelcome = latest(afterLeaveSocket, 'welcome')
+    assert.equal(afterLeaveWelcome.resumeRejected, true)
+    assert.equal(afterLeaveWelcome.resumeReason, 'invalid_or_expired')
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })
@@ -1319,6 +1480,34 @@ test('the card giver wins when a wrong-claim exchange removes their last card', 
     assert.equal(latest(hostSocket, 'roundResult').reason, 'wrong')
     assert.equal(latest(hostSocket, 'matchOver').winner, 'B')
     assert.equal(latest(hostSocket, 'room').room.matchWinner, 'B')
+  } finally {
+    manager.dispose()
+    await rm(temp, { recursive: true, force: true })
+  }
+})
+
+test('room cards keep catalog keys intact so card images still resolve', async () => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'karuta-room-card-key-'))
+  const manager = new OnlineRoomManager(temp)
+  try {
+    const packageId = await writeCatalogPackageWithWideSpace(temp)
+    const catalog = await manager.getPackageCatalog(packageId)
+    const oddCard = catalog.cards.find((card) => card.workName.includes('\u3000'))
+    assert.ok(oddCard, 'catalog must contain the ideographic-space card')
+    const catalogImage = await manager.getPackageCardImage(packageId, oddCard.key)
+    assert.ok(catalogImage?.data?.length)
+
+    const hostSocket = new FakeSocket()
+    const host = manager.connect(hostSocket)
+    await manager.handle(host, JSON.stringify({ t: 'createRoom', nickname: 'host', packageId }))
+    const room = [...manager.rooms.values()][0]
+    const roomCard = room.cards.find((card) => card.key === oddCard.key)
+    assert.ok(roomCard, 'room must keep the card')
+    // Whitespace normalisation used to rewrite the key and break the lookup.
+    assert.equal(roomCard.key, oddCard.key)
+    assert.ok(roomCard.key.includes('\u3000'))
+    const roomImage = await manager.getPackageCardImage(packageId, roomCard.key)
+    assert.ok(roomImage?.data?.length)
   } finally {
     manager.dispose()
     await rm(temp, { recursive: true, force: true })

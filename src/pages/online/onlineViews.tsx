@@ -12,7 +12,7 @@ import {
 import { OnlineSocket } from '../../lib/onlineSocket'
 import type { ServerPackageCatalogCard } from '../../lib/serverPackages'
 import { MAX_HAND_SLOTS } from './onlineConstants'
-import type { BattleAnimation, BattleStyle, ClaimState } from './onlineTypes'
+import type { BattleAnimation, BattleStyle, ClaimState, OnlineDraftSubmitState } from './onlineTypes'
 import {
   clampOnlineVolume,
   formatNetworkMetric,
@@ -420,6 +420,7 @@ interface DraftCardPickerProps {
   cards: OnlineCardView[]
   selected: Set<string>
   limit: number
+  submitState: OnlineDraftSubmitState
   opponentCount: number
   opponentLabel: string
   submitLabel: string
@@ -433,12 +434,22 @@ export function DraftCardPicker({
   cards,
   selected,
   limit,
+  submitState,
   opponentCount,
   opponentLabel,
   submitLabel,
   onToggle,
   onSubmit,
 }: DraftCardPickerProps) {
+  const readyToSubmit = selected.size === limit
+  const submitLabelText =
+    submitState === 'sending'
+      ? '提交中…'
+      : submitState === 'confirmed'
+        ? '已确认 · 等待对手'
+        : submitState === 'failed'
+          ? '提交失败，点击重试'
+          : submitLabel
   return (
     <section className="panel stack draft-panel">
       <div className="row spread">
@@ -452,14 +463,25 @@ export function DraftCardPicker({
         <span>你的选择：{selected.size} / {limit}</span>
         <span>{opponentLabel}：{opponentCount} / {limit}</span>
       </div>
+      {submitState === 'confirmed' ? (
+        <p className="muted small">已提交 {limit} 张。对手确认前仍可修改；修改后需要重新提交。</p>
+      ) : null}
+      {submitState === 'failed' ? (
+        <p className="muted small">服务器没有确认这次提交，请检查连接后重试。</p>
+      ) : null}
       <div className="draft-card-grid">
         {cards.map((meta) => (
           <DraftCard key={meta.key} meta={meta} selected={selected.has(meta.key)} onToggle={onToggle} />
         ))}
       </div>
       {!cards.length ? <div className="empty-state">正在等待服务器下发本阶段牌池…</div> : null}
-      <button className="btn btn-primary btn-lg" type="button" disabled={selected.size !== limit} onClick={onSubmit}>
-        {submitLabel}
+      <button
+        className="btn btn-primary btn-lg"
+        type="button"
+        disabled={!readyToSubmit || submitState === 'sending' || submitState === 'confirmed'}
+        onClick={onSubmit}
+      >
+        {submitLabelText}
       </button>
     </section>
   )

@@ -3,6 +3,7 @@ import { OnlineCardTile } from '../../components/OnlineCardTile'
 import type { OnlineCardView, OnlineRoomView } from '../../lib/onlineProtocol'
 import type { OnlineSocket } from '../../lib/onlineSocket'
 import { BAN_SIZE, DRAFT_SELECTION_SIZE } from './onlineConstants'
+import type { OnlineDraftSubmitState } from './onlineTypes'
 import {
   DraftCardPicker,
   NetworkFairness,
@@ -101,6 +102,7 @@ export function OnlineDraftSelect({
   room,
   cards,
   selected,
+  submitState,
   canReconnect,
   onReconnect,
   onLeave,
@@ -111,6 +113,7 @@ export function OnlineDraftSelect({
   room: OnlineRoomView
   cards: OnlineCardView[]
   selected: Set<string>
+  submitState: OnlineDraftSubmitState
   canReconnect: boolean
   onReconnect: () => void
   onLeave: () => void
@@ -135,6 +138,7 @@ export function OnlineDraftSelect({
         cards={cards}
         selected={selected}
         limit={DRAFT_SELECTION_SIZE}
+        submitState={submitState}
         opponentCount={room.draft.opponentSelectedCount}
         opponentLabel="对手已选"
         submitLabel="确认 30 张并进入互换"
@@ -150,6 +154,7 @@ export function OnlineDraftBan({
   room,
   cards,
   selected,
+  submitState,
   canReconnect,
   onReconnect,
   onLeave,
@@ -160,6 +165,7 @@ export function OnlineDraftBan({
   room: OnlineRoomView
   cards: OnlineCardView[]
   selected: Set<string>
+  submitState: OnlineDraftSubmitState
   canReconnect: boolean
   onReconnect: () => void
   onLeave: () => void
@@ -184,6 +190,7 @@ export function OnlineDraftBan({
         cards={cards}
         selected={selected}
         limit={BAN_SIZE}
+        submitState={submitState}
         opponentCount={room.draft.opponentBannedCount}
         opponentLabel="对手已 BAN"
         submitLabel="确认 BAN 5 张并进入排牌"

@@ -2,6 +2,17 @@ export type OnlinePlayerId = 'A' | 'B'
 export type OnlineRoomPhase = 'lobby' | 'draft_select' | 'draft_ban' | 'arrange' | 'playing' | 'over'
 export type OnlineDraftPhase = 'waiting' | 'select' | 'ban' | 'arrange'
 
+/**
+ * Why the server refused to restore a player seat. The client uses the reason
+ * to explain the failure and to clean up the stale room instead of leaving a
+ * dead match on screen.
+ */
+export type OnlineResumeReason =
+  | 'session_already_bound'
+  | 'invalid_or_expired'
+  | 'seat_missing'
+  | 'seat_occupied'
+
 export interface OnlineCardView {
   key: string
   number: number
@@ -153,7 +164,13 @@ export interface OnlineRoundResult {
 }
 
 export type OnlineServerMessage =
-  | { t: 'welcome'; resumed: boolean; resumeToken?: string; resumeRejected?: boolean }
+  | {
+      t: 'welcome'
+      resumed: boolean
+      resumeToken?: string
+      resumeRejected?: boolean
+      resumeReason?: OnlineResumeReason
+    }
   | { t: 'room'; room: OnlineRoomView }
   | { t: 'roomList'; rooms: OnlineRoomSummary[] }
   | { t: 'matchAudio'; tracks: Array<{ audioUrl: string }>; total: number }
