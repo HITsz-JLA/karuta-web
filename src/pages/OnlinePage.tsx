@@ -65,6 +65,11 @@ import {
   waitForMediaReady,
 } from './online/onlineHelpers'
 import {
+  onlineAudioForeignMediaUrl,
+  onlineAudioGestureMediaUrl,
+  onlineAudioSourceAttached,
+} from './online/onlineAudioSession'
+import {
   BattleAnimationOverlay,
   HandArea,
   NetworkFairness,
@@ -793,12 +798,27 @@ export function OnlinePage() {
     }
 
     const cached = localAudioUrlRef.current
-    const attachedToSource = Boolean(cached && cached.source === source && mediaHasUrl(audio, cached.url))
-    if (!attachedToSource) {
+    const attachSources = {
+      roundAudioUrl: roundRef.current?.audioUrl || null,
+      preparedAudioUrl: roundPreparationRef.current?.audioUrl || null,
+      restAudioUrl: roomRef.current?.restAudioUrl || null,
+      loadedLocalSource: cached?.source || null,
+      loadedLocalUrl: cached?.url || null,
+      mediaSrc: audio.src,
+      mediaCurrentSrc: audio.currentSrc,
+    }
+    if (!onlineAudioSourceAttached(attachSources)) {
       setAudioStatus('loading')
       setLocalAudioReady(false)
       setAudioReadySession(null)
       audio.pause()
+      // Keep the foreign source off the element as well: while the previous
+      // rest track stays attached, a later gesture or a late media callback
+      // could start it and then seek it to the running round's clock.
+      if (onlineAudioForeignMediaUrl(attachSources)) {
+        audio.removeAttribute('src')
+        audio.load()
+      }
     }
     let cancelled = false
 
@@ -1532,8 +1552,22 @@ export function OnlinePage() {
       return
     }
 
-    const isRestAudio = !round && !roundPreparation && Boolean(room?.restAudioUrl)
-    if (!round && !isRestAudio) {
+    const cachedLocalAudio = localAudioUrlRef.current
+    const gestureMediaUrl = onlineAudioGestureMediaUrl({
+      roundAudioUrl: round?.audioUrl || null,
+      preparedAudioUrl: roundPreparation?.audioUrl || null,
+      restAudioUrl: room?.restAudioUrl || null,
+      loadedLocalSource: cachedLocalAudio?.source || null,
+      loadedLocalUrl: cachedLocalAudio?.url || null,
+      mediaSrc: audio.src,
+      mediaCurrentSrc: audio.currentSrc,
+    })
+    // The element only counts as playable while it holds the source this
+    // session prepared. Otherwise the gesture would start whatever track is
+    // still attached — typically the rest song that was just paused — and seek
+    // it to the running round's clock, so it plays the wrong music until the
+    // round audio finishes downloading.
+    if (!gestureMediaUrl) {
       const silentUrl = createSilentAudioUrl()
       const silentAudio = new Audio()
       silentAudio.preload = 'auto'
