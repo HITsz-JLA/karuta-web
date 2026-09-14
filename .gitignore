@@ -1,0 +1,45 @@
+# Dependencies and package-manager caches
+node_modules/
+.pnpm-store/
+.npm/
+
+# Build, test and tooling output
+dist/
+dist-ssr/
+coverage/
+.nyc_output/
+.vite/
+*.tsbuildinfo
+*.cache
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Server data and locally bundled runtimes
+data-packages/
+runtime/
+
+# Logs, process state and temporary files
+logs/
+*.log
+*.pid
+.karuta-web-*.lock
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+

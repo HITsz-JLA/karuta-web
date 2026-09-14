@@ -1,0 +1,56 @@
+import { memo } from 'react'
+import { useNearViewportImage } from '../hooks/useNearViewportImage'
+import { useObjectUrl } from '../hooks/useObjectUrl'
+import type { CardEntry } from '../types/models'
+
+interface CardTileProps {
+  card: CardEntry
+  selected?: boolean
+  onClick?: () => void
+  onToggle?: (cardId: string) => void
+  showSongCount?: boolean
+}
+
+function areCardTilePropsEqual(previous: CardTileProps, next: CardTileProps) {
+  return (
+    previous.card.id === next.card.id &&
+    previous.card.number === next.card.number &&
+    previous.card.imageBlobKey === next.card.imageBlobKey &&
+    previous.card.workName === next.card.workName &&
+    previous.card.songs.length === next.card.songs.length &&
+    previous.selected === next.selected &&
+    previous.onClick === next.onClick &&
+    previous.onToggle === next.onToggle &&
+    previous.showSongCount === next.showSongCount
+  )
+}
+
+export const CardTile = memo(function CardTile({ card, selected, onClick, onToggle, showSongCount = true }: CardTileProps) {
+  const [shouldLoad, setTarget] = useNearViewportImage(Boolean(card.imageBlobKey), '.local-select-viewport')
+  const url = useObjectUrl(shouldLoad ? card.imageBlobKey : null, { thumbnail: true })
+  const handleClick = onToggle ? () => onToggle(card.id) : onClick
+
+  return (
+    <button
+      ref={setTarget}
+      type="button"
+      className={`card-tile${selected ? ' selected' : ''}`}
+      onClick={handleClick}
+      aria-pressed={onToggle ? selected : undefined}
+      aria-label={`#${card.number} ${card.workName}，${card.songs.length} 首${selected ? '，已选' : ''}`}
+    >
+      <span className="num-badge">#{card.number}</span>
+      {selected ? <span className="check-badge">✓</span> : null}
+      <div className="thumb">
+        {url ? (
+          <img src={url} alt={card.workName} loading="lazy" decoding="async" />
+        ) : card.imageBlobKey ? null : (
+          <div className="empty-state small">无图片</div>
+        )}
+        {card.imageBlobKey && !url ? <span className="thumb-skeleton" aria-hidden="true" /> : null}
+      </div>
+      <div className="title">{card.workName}</div>
+      {showSongCount ? <div className="muted small">{card.songs.length} 首</div> : null}
+    </button>
+  )
+}, areCardTilePropsEqual)
